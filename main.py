@@ -29,6 +29,7 @@ RECEIVE_ID = os.environ.get("FEISHU_RECEIVE_ID", "")
 RECEIVE_ID_TYPE = os.environ.get("FEISHU_RECEIVE_ID_TYPE", "chat_id")
 MAILBOXES = json.loads(os.environ.get("MAILBOXES_JSON", "[]"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
+START_FROM_UID = int(os.environ.get("START_FROM_UID", "0"))
 STATE_FILE = os.environ.get("STATE_FILE", "/data/last_uid.json")
 PORT = int(os.environ.get("PORT", "8000"))
 
@@ -114,7 +115,7 @@ def poll_mailbox(mb):
     name = mb.get("name", user)
 
     state = load_state()
-    last_uid = int(state.get(name, 0))
+    last_uid = int(state.get(name, START_FROM_UID))
 
     M = imaplib_connect(host, port, user, pwd)
     M.select(folder)
