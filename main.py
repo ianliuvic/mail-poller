@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 from email.header import decode_header, make_header
 from email.parser import BytesHeaderParser
-from email.utils import getaddresses
+from email.utils import getaddresses, parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import mailai
@@ -199,12 +199,18 @@ def poll_mailbox(mb):
             from_ = decode_mime(msg.get("From"))
             subject = decode_mime(msg.get("Subject"))
             body, _ = mailai.extract_body(msg)
+            date_str = ""
+            try:
+                date_str = parsedate_to_datetime(msg.get("Date")).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
             found.append({
                 "uid": uid,
                 "folder": folder,
                 "from": from_,
                 "subject": subject,
                 "body": body,
+                "date": date_str,
                 "in_reply_to": msg.get("In-Reply-To") or "",
                 "references": msg.get("References") or "",
             })
@@ -404,6 +410,32 @@ def process_mail(item, contacts_emails, sent_mids, sent_recipients):
     return True, label, summary
 
 
+FOLDER_DISPLAY = {
+    "INBOX": "收件箱",
+    "Notification": "通知",
+    "Newsletter": "订阅",
+}
+
+
+def _folder_display(folder):
+    if folder in FOLDER_DISPLAY:
+        return FOLDER_DISPLAY[folder]
+    return imap_utf7_decode(folder)
+
+
+def format_notify_text(folder_label, label, from_, subject, summary, date):
+    lines = [f"📬【{label}】{folder_label}"]
+    if from_:
+        lines.append(f"发件人：{from_}")
+    if subject:
+        lines.append(f"主题：{subject}")
+    if date:
+        lines.append(f"时间：{date}")
+    if summary:
+        lines.append(f"摘要：{summary}")
+    return "\n".join(lines)
+
+
 # ---------- loop ----------
 
 def poll_once():
@@ -425,12 +457,12 @@ def poll_once():
             for item in poll_mailbox(mb):
                 from_ = item["from"]
                 subject = item["subject"]
-                folder_label = imap_utf7_decode(item.get("folder", ""))
+                folder_label = _folder_display(item.get("folder", ""))
                 should, label, summary = process_mail(item, contacts_emails, sent_mids, sent_recipients)
                 log(f"mail [{name}/{folder_label}] from={from_} label={label} notify={should}")
                 if not should:
                     continue
-                text = f"[{name}/{folder_label}] {label}\n发件人: {from_}\n主题: {subject}\n摘要: {summary}"
+                text = format_notify_text(folder_label, label, from_, subject, summary, item.get("date", ""))
                 log("notify:", text)
                 try:
                     feishu_send(text)
