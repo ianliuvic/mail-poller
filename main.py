@@ -199,15 +199,14 @@ def poll_mailbox(mb):
             from_ = decode_mime(msg.get("From"))
             subject = decode_mime(msg.get("Subject"))
             body, _ = mailai.extract_body(msg)
-            is_reply = bool(msg.get("In-Reply-To") or msg.get("References")) or \
-                (re.match(r"^\s*(re|回复|答复|fw|fwd|转发)\s*[:：]", subject or "", re.I) is not None)
             found.append({
                 "uid": uid,
                 "folder": folder,
                 "from": from_,
                 "subject": subject,
                 "body": body,
-                "is_reply": is_reply,
+                "in_reply_to": msg.get("In-Reply-To") or "",
+                "references": msg.get("References") or "",
             })
         if uids:
             state[key] = max(uids)
@@ -339,11 +338,81 @@ def collect_sent(mb):
         M.logout()
 
 
+# ---------- decision pipeline ----------
+
+def _extract_email(from_):
+    try:
+        for _name, addr in getaddresses([from_]):
+            if addr and "@" in addr:
+                return addr.strip().lower()
+    except Exception:
+        pass
+    return ""
+
+
+def _extract_message_ids(header_value):
+    return re.findall(r"<([^>]+)>", header_value or "")
+
+
+def _is_reply(in_reply_to, references, subject):
+    if in_reply_to or references:
+        return True
+    return re.match(r"^\s*(re|回复|答复|aw|res)\s*[:：]", subject or "", re.I) is not None
+
+
+def load_contacts_emails():
+    try:
+        with open(zoho_contacts.CACHE_FILE, "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return {c.get("email", "").lower() for c in d.get("contacts", []) if c.get("email")}
+    except Exception:
+        return set()
+
+
+def process_mail(item, contacts_emails, sent_mids, sent_recipients):
+    """Return (should_notify, label, summary)."""
+    from_ = item["from"]
+    subject = item["subject"]
+    clean = mailai.strip_quotes(item["body"])
+    from_addr = _extract_email(from_)
+    in_reply_to = item.get("in_reply_to", "")
+    references = item.get("references", "")
+    is_reply = _is_reply(in_reply_to, references, subject)
+
+    is_contact = bool(from_addr and from_addr in contacts_emails)
+    refs_my_mid = any(
+        _norm_mid(m) in sent_mids
+        for m in _extract_message_ids(in_reply_to) + _extract_message_ids(references)
+    )
+    reply_to_me = is_reply and (refs_my_mid or (from_addr and from_addr in sent_recipients))
+
+    verdict, summary, err = mailai.classify_useful(
+        from_, subject, clean,
+        is_contact=is_contact,
+        is_reply=reply_to_me,
+    )
+
+    if is_contact:
+        return True, "客户", summary or subject or f"来自 {from_}"
+    if reply_to_me:
+        return True, "回复", summary or subject or f"回复：{subject}"
+    if err:
+        return True, "未知", summary or subject or f"来自 {from_}"
+    if verdict == "unrelated":
+        return False, "无关", summary
+    label = "泳装相关" if verdict == "useful" else "中性"
+    return True, label, summary
+
+
 # ---------- loop ----------
 
 def poll_once():
     if not MAILBOXES:
         return
+    contacts_emails = load_contacts_emails()
+    sent, _ = load_sent_set()
+    sent_mids = sent["message_ids"]
+    sent_recipients = sent["recipient_emails"]
     for mb in MAILBOXES:
         name = mb.get("name", mb.get("user", "?"))
         try:
@@ -357,11 +426,8 @@ def poll_once():
                 from_ = item["from"]
                 subject = item["subject"]
                 folder_label = imap_utf7_decode(item.get("folder", ""))
-                clean = mailai.strip_quotes(item["body"])
-                known = any(c and c.lower() in from_.lower() for c in CONTACTS)
-                result, err = mailai.classify_email(from_, subject, clean, known, item["is_reply"])
-                should, label, summary = mailai.decide(result, known, item["is_reply"])
-                log(f"mail [{name}/{folder_label}] from={from_} label={label} notify={should} err={err or ''}")
+                should, label, summary = process_mail(item, contacts_emails, sent_mids, sent_recipients)
+                log(f"mail [{name}/{folder_label}] from={from_} label={label} notify={should}")
                 if not should:
                     continue
                 text = f"[{name}/{folder_label}] {label}\n发件人: {from_}\n主题: {subject}\n摘要: {summary}"

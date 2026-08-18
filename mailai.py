@@ -141,44 +141,45 @@ def strip_quotes(text):
     return result
 
 
-# ---------- LLM classification ----------
+# ---------- LLM classification (usefulness + summary) ----------
 
-_SYSTEM_PROMPT = """你是一名邮件分析助手。给定一封邮件，请完成两件事：
-1. 提取「发件人本次新写的内容」：忽略所有历史引用（以 > 开头的行、原文引用、"原始邮件 / Original Message / On ... wrote" 之后的内容、签名、免责声明）。只基于本次新增内容判断。
-2. 分类并总结。
+_SWIMWEAR_PROMPT = """你是一家中国泳装公司的邮件筛选助手。公司做泳装/比基尼/沙滩装的外贸生意（B2B 批发、OEM/ODM 贴牌、电商）。
 
-严格输出 JSON（不要输出任何其他文字），字段：
-- category: order | inquiry | notification | newsletter | spam | other
-- priority: high | medium | low
-- summary: 一句话中文摘要（30字内）
-- reply_needed: true | false
+请对邮件做两件事：
+1. 判断这封邮件对公司是否值得关注（verdict）。
+2. 用一句话中文总结邮件要点（summary，40 字内）。
 
-判定规则：
-- 询价/报价/下单/付款/合作/客户问题/投诉 = inquiry 或 order，priority high
-- 陌生人的业务询价 = inquiry，priority high（新线索，很重要）
-- 系统通知(GitHub/Shopify/账单/登录/服务器提醒等) = notification，priority low
-- 订阅/营销/推广/newsletter = newsletter，priority low
-- 垃圾/钓鱼/诈骗 = spam，priority low
-- 回复且来自联系人 = 优先 high
-- 无法判断 = other，priority medium"""
+严格输出 JSON（不要输出任何其他文字）：
+{"verdict": "useful | neutral | unrelated", "summary": "一句话中文摘要"}
+
+判定标准：
+- useful（泳装相关，有价值）：询价、报价、下单、付款、样品/寄样、OEM/ODM/贴牌合作、面料/辅料/包装/物流等供应链合作、客户问题/投诉、合作意向、展会/行业活动等与泳装生意相关的内容。
+- unrelated（绝对无关，阻挡）：SEO 优化、代运营、店铺推广、建站/软件/SaaS、招聘、培训、新闻资讯、订阅/Newsletter、营销广告、系统通知（账单/登录/服务器）、垃圾/钓鱼/诈骗等与泳装业务完全无关的内容。
+- neutral（中性，放行）：信息不完整、含义不明、无法判断是否与泳装相关。存疑时优先判 neutral。
+
+原则：只要可能和泳装生意沾边，就判 useful 或 neutral；只有「绝对无关」才判 unrelated。宁可多放行，不要漏掉生意。"""
 
 
-def classify_email(from_, subject, body, known, is_reply):
-    """Return (result_dict, error). result_dict is None on failure."""
+def classify_useful(from_, subject, body, is_contact=False, is_reply=False):
+    """Return (verdict, summary, error). verdict in {'useful','neutral','unrelated'}."""
     if not DEEPSEEK_API_KEY:
-        return None, "no deepseek key"
+        return None, "", "no deepseek key"
     body = (body or "").strip()[:MAX_BODY_CHARS]
+    context = []
+    if is_contact:
+        context.append("发件人在公司联系人列表(CAM-03)中")
+    if is_reply:
+        context.append("这是对方回复我方的邮件")
     user_msg = (
         f"发件人: {from_}\n"
         f"主题: {subject}\n"
-        f"是否联系人: {'是' if known else '否'}\n"
-        f"是否回复: {'是' if is_reply else '否'}\n"
+        f"背景: {'；'.join(context) if context else '陌生人来信'}\n"
         f"正文(已预剥引用):\n{body if body else '(空)'}"
     )
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": _SWIMWEAR_PROMPT},
             {"role": "user", "content": user_msg},
         ],
         "temperature": 0,
@@ -194,39 +195,20 @@ def classify_email(from_, subject, body, known, is_reply):
             d = json.loads(r.read().decode("utf-8"))
         content = d["choices"][0]["message"]["content"]
     except Exception as e:
-        return None, f"llm error: {e}"
+        return None, "", f"llm error: {e}"
     try:
-        return json.loads(content), None
+        obj = json.loads(content)
     except Exception:
         m = re.search(r"\{.*\}", content, re.S)
         if m:
             try:
-                return json.loads(m.group(0)), None
+                obj = json.loads(m.group(0))
             except Exception:
-                pass
-        return None, f"json parse error: {content[:200]}"
-
-
-CATEGORY_LABEL = {
-    "order": "订单",
-    "inquiry": "询盘",
-    "notification": "通知",
-    "newsletter": "订阅",
-    "spam": "垃圾",
-    "other": "其他",
-}
-
-
-def decide(result, known, is_reply):
-    """Return (should_notify, label, summary). label like '询盘·高'."""
-    if result is None:
-        return True, "未知", "（分类失败，按默认推送）"
-    category = (result.get("category") or "other").lower()
-    priority = (result.get("priority") or "medium").lower()
-    summary = (result.get("summary") or "").strip()
-    if category in ("spam", "newsletter"):
-        return False, CATEGORY_LABEL.get(category, category), summary
-    if priority in ("high", "medium"):
-        label = CATEGORY_LABEL.get(category, category) + ("·高" if priority == "high" else "·中")
-        return True, label, summary
-    return False, CATEGORY_LABEL.get(category, category), summary
+                return None, "", f"json parse error: {content[:200]}"
+        else:
+            return None, "", f"json parse error: {content[:200]}"
+    verdict = (obj.get("verdict") or "neutral").strip().lower()
+    if verdict not in ("useful", "neutral", "unrelated"):
+        verdict = "neutral"
+    summary = (obj.get("summary") or "").strip()
+    return verdict, summary, None
