@@ -91,53 +91,43 @@ def feishu_send(text):
     return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
 
 
-def feishu_send_card(folder_label, label, from_, subject, summary, date, email):
-    """Send an interactive card with action buttons (reply via card.action.trigger)."""
+def feishu_send_card(folder_label, label, from_, subject, summary, date, email, name="", show_buttons=False):
+    """Send an interactive card. Buttons only shown for explicit stranger inquiries."""
     if not (FEISHU_APP_ID and FEISHU_APP_SECRET and RECEIVE_ID):
         log("feishu not configured, skip send")
         return None
     token = feishu_token()
     url = ("https://open.feishu.cn/open-apis/im/v1/messages"
            "?receive_id_type=" + urllib.parse.quote(RECEIVE_ID_TYPE))
+    elements = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "plain_text",
+                "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}",
+            },
+        },
+    ]
+    if show_buttons:
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "➕ 加入 CAM-03"},
+                    "type": "primary",
+                    "value": {"action": "add_contact", "email": email, "name": name, "from": from_, "subject": subject},
+                },
+            ],
+        })
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "blue",
             "title": {"tag": "plain_text", "content": f"{label} · {folder_label}"},
         },
-        "elements": [
-            {
-                "tag": "div",
-                "text": {
-                    "tag": "plain_text",
-                    "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}",
-                },
-            },
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "✅ 标记询盘"},
-                        "type": "primary",
-                        "value": {"action": "mark_inquiry", "email": email, "from": from_, "subject": subject},
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "👤 加联系人"},
-                        "type": "default",
-                        "value": {"action": "add_contact", "email": email, "from": from_},
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "忽略"},
-                        "type": "danger",
-                        "value": {"action": "ignore", "email": email},
-                    },
-                ],
-            },
-        ],
+        "elements": elements,
     }
     body = json.dumps({
         "receive_id": RECEIVE_ID,
@@ -417,6 +407,16 @@ def _extract_email(from_):
     return ""
 
 
+def _extract_name(from_):
+    try:
+        for name, addr in getaddresses([from_]):
+            if name:
+                return name.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _extract_message_ids(header_value):
     return re.findall(r"<([^>]+)>", header_value or "")
 
@@ -437,7 +437,11 @@ def load_contacts_emails():
 
 
 def process_mail(item, contacts_emails, sent_mids, sent_recipients):
-    """Return (should_notify, label, summary)."""
+    """Return a dict: {should, label, summary, name, buttons}.
+
+    `buttons` is True only for an explicit stranger inquiry (useful verdict) —
+    those are the emails where the "加入 CAM-03" button should appear.
+    """
     from_ = item["from"]
     subject = item["subject"]
     clean = mailai.strip_quotes(item["body"])
@@ -453,22 +457,24 @@ def process_mail(item, contacts_emails, sent_mids, sent_recipients):
     )
     reply_to_me = is_reply and (refs_my_mid or (from_addr and from_addr in sent_recipients))
 
-    verdict, summary, err = mailai.classify_useful(
+    verdict, summary, name, err = mailai.classify_useful(
         from_, subject, clean,
         is_contact=is_contact,
         is_reply=reply_to_me,
     )
+    name = name or _extract_name(from_)
 
     if is_contact:
-        return True, "客户", summary or subject or f"来自 {from_}"
+        return {"should": True, "label": "客户", "summary": summary or subject or f"来自 {from_}", "name": name, "buttons": False}
     if reply_to_me:
-        return True, "回复", summary or subject or f"回复：{subject}"
+        return {"should": True, "label": "回复", "summary": summary or subject or f"回复：{subject}", "name": name, "buttons": False}
     if err:
-        return True, "未知", summary or subject or f"来自 {from_}"
+        return {"should": True, "label": "未知", "summary": summary or subject or f"来自 {from_}", "name": name, "buttons": False}
     if verdict == "unrelated":
-        return False, "无关", summary
-    label = "泳装相关" if verdict == "useful" else "中性"
-    return True, label, summary
+        return {"should": False, "label": "无关", "summary": summary, "name": name, "buttons": False}
+    if verdict == "useful":
+        return {"should": True, "label": "泳装相关", "summary": summary, "name": name, "buttons": True}
+    return {"should": True, "label": "中性", "summary": summary, "name": name, "buttons": False}
 
 
 FOLDER_DISPLAY = {
@@ -519,14 +525,14 @@ def poll_once():
                 from_ = item["from"]
                 subject = item["subject"]
                 folder_label = _folder_display(item.get("folder", ""))
-                should, label, summary = process_mail(item, contacts_emails, sent_mids, sent_recipients)
-                log(f"mail [{name}/{folder_label}] from={from_} label={label} notify={should}")
-                if not should:
+                r = process_mail(item, contacts_emails, sent_mids, sent_recipients)
+                log(f"mail [{name}/{folder_label}] from={from_} label={r['label']} notify={r['should']} buttons={r['buttons']}")
+                if not r["should"]:
                     continue
                 email = _extract_email(from_)
-                log(f"notify card: [{label}] {from_} | {subject}")
+                log(f"notify card: [{r['label']}] {from_} | {subject}")
                 try:
-                    feishu_send_card(folder_label, label, from_, subject, summary, item.get("date", ""), email)
+                    feishu_send_card(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], r["buttons"])
                 except Exception as e:
                     log("feishu send failed:", e)
         except Exception as e:
@@ -564,6 +570,39 @@ def contacts_sync_loop():
             time.sleep(3600)
 
 
+# ---------- Feishu card action dispatch ----------
+
+ACTION_HANDLERS = {}
+
+
+def register_action(name):
+    def decorator(fn):
+        ACTION_HANDLERS[name] = fn
+        return fn
+    return decorator
+
+
+@register_action("add_contact")
+def action_add_contact(value):
+    """Add the stranger's email (and extracted name) to CAM-03."""
+    email = (value.get("email") or "").strip().lower()
+    name = (value.get("name") or "").strip() or _extract_name(value.get("from", ""))
+    if not email or "@" not in email:
+        return {"toast": {"type": "error", "content": "缺少有效邮箱"}}
+    try:
+        resp = zoho_contacts.subscribe_contact(email, name)
+        log(f"add_contact: {email} name={name!r} -> {resp.get('message', resp)}")
+        try:
+            payload = zoho_contacts.sync_contacts()
+            log(f"contacts cache refreshed after add_contact: {payload['count']} contacts")
+        except Exception as e:
+            log("contacts cache refresh failed:", e)
+        return {"toast": {"type": "success", "content": f"已加入 CAM-03：{email}"}}
+    except Exception as e:
+        log("add_contact failed:", e)
+        return {"toast": {"type": "error", "content": f"加入失败：{e}"}}
+
+
 def handle_feishu_callback(body_bytes):
     """Handle a Feishu event-subscription POST. Returns a JSON-serializable dict."""
     try:
@@ -593,9 +632,11 @@ def handle_feishu_callback(body_bytes):
             "email": value.get("email"),
             "operator_open_id": operator.get("open_id", ""),
         }, ensure_ascii=False))
-        # TODO: dispatch next step based on value.get("action") (mark_inquiry / add_contact / ignore)
-    else:
-        log("feishu callback event:", event_type)
+        handler = ACTION_HANDLERS.get(value.get("action", ""))
+        if handler:
+            return handler(value)
+        return {"toast": {"type": "warning", "content": "未知操作"}}
+    log("feishu callback event:", event_type)
     return {"code": 0}
 
 

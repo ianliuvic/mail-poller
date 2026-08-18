@@ -35,10 +35,11 @@
 1. 发件人在 CAM-03 → 放行（标签「客户」）。
 2. 否则判断是否「回复我」：有 `In-Reply-To`/`References`/`Re:` 且（引用了我发出的 Message-ID，或发件人在我的发件收件人集合里）→ 放行（标签「回复」）。转发不算回复。
 3. 否则交给 LLM 判定：`useful`（泳装相关）→ 放行；`neutral`（中性）→ 放行；`unrelated`（绝对无关：SEO/推广/通知/新闻/垃圾）→ 阻挡。
-4. 放行的邮件用 LLM 生成一句中文摘要，推送到飞书（卡片消息，带「标记询盘/加联系人/忽略」按钮）。
+4. 放行的邮件用 LLM 生成一句中文摘要，推送到飞书（卡片消息）。**只有「泳装相关」的陌生询盘**卡片上才带「➕ 加入 CAM-03」按钮。
 
 ## 飞书事件回调
 
 - 端点：`POST /feishu/callback`（也兼容 `GET /feishu/callback?challenge=...`）。
-- 用途：接收飞书卡片按钮点击（`card.action.trigger`），`value` 里带 `{action, email, from, subject}`。
+- 用途：接收飞书卡片按钮点击（`card.action.trigger`），`value` 里带 `{action, email, name, from, subject}`。
+- 按钮动作通过 `ACTION_HANDLERS` 注册表分发（`@register_action("xxx")`），便于扩展；当前内置 `add_contact`：把邮箱 + LLM 提取的姓名加入 CAM-03，并刷新本地联系人缓存。
 - 在飞书开放平台给应用配置「事件订阅」时，把请求地址填为 `https://<域名>/feishu/callback`，并填写 `FEISHU_VERIFICATION_TOKEN` 环境变量。

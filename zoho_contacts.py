@@ -148,3 +148,31 @@ def seconds_until_next_midnight(tz_name):
     now = datetime.now(tz)
     nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return max(1.0, (nxt - now).total_seconds())
+
+
+def subscribe_contact(email, first_name="", last_name=""):
+    """Add/update a contact on the configured list via listsubscribe.
+
+    With the list's signup form disabled, this adds directly (active) without
+    sending any confirmation email. Returns the Zoho response dict.
+    """
+    if not is_configured():
+        raise RuntimeError("zoho contacts not configured (missing ZOHO_* / CAMPAIGNS_LISTKEY)")
+    token = _access_token()
+    contact = {"Contact Email": email}
+    if first_name:
+        contact["First Name"] = first_name
+    if last_name:
+        contact["Last Name"] = last_name
+    params = urllib.parse.urlencode({
+        "resfmt": "JSON",
+        "listkey": LISTKEY,
+        "contactinfo": json.dumps(contact, ensure_ascii=False),
+    })
+    url = CAMPAIGNS_BASE[ZOHO_REGION] + "/json/listsubscribe?" + params
+    req = urllib.request.Request(url, data=b"", method="POST", headers={
+        "Authorization": "Zoho-oauthtoken " + token,
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=90) as resp:
+        return json.loads(resp.read().decode("utf-8"))

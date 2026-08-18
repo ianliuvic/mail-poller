@@ -145,12 +145,13 @@ def strip_quotes(text):
 
 _SWIMWEAR_PROMPT = """你是一家中国泳装公司的邮件筛选助手。公司做泳装/比基尼/沙滩装的外贸生意（B2B 批发、OEM/ODM 贴牌、电商）。
 
-请对邮件做两件事：
+请对邮件做三件事：
 1. 判断这封邮件对公司是否值得关注（verdict）。
 2. 用一句话中文总结邮件要点（summary，40 字内）。
+3. 提取发件人姓名（name）：优先从 From 头的显示名提取，否则从正文落款/签名里提取；无法确定就返回空字符串。
 
 严格输出 JSON（不要输出任何其他文字）：
-{"verdict": "useful | neutral | unrelated", "summary": "一句话中文摘要"}
+{"verdict": "useful | neutral | unrelated", "summary": "一句话中文摘要", "name": "发件人姓名或空字符串"}
 
 判定标准：
 - useful（泳装相关，有价值）：询价、报价、下单、付款、样品/寄样、OEM/ODM/贴牌合作、面料/辅料/包装/物流等供应链合作、客户问题/投诉、合作意向、展会/行业活动等与泳装生意相关的内容。
@@ -161,9 +162,9 @@ _SWIMWEAR_PROMPT = """你是一家中国泳装公司的邮件筛选助手。公�
 
 
 def classify_useful(from_, subject, body, is_contact=False, is_reply=False):
-    """Return (verdict, summary, error). verdict in {'useful','neutral','unrelated'}."""
+    """Return (verdict, summary, name, error). verdict in {'useful','neutral','unrelated'}."""
     if not DEEPSEEK_API_KEY:
-        return None, "", "no deepseek key"
+        return None, "", "", "no deepseek key"
     body = (body or "").strip()[:MAX_BODY_CHARS]
     context = []
     if is_contact:
@@ -195,7 +196,7 @@ def classify_useful(from_, subject, body, is_contact=False, is_reply=False):
             d = json.loads(r.read().decode("utf-8"))
         content = d["choices"][0]["message"]["content"]
     except Exception as e:
-        return None, "", f"llm error: {e}"
+        return None, "", "", f"llm error: {e}"
     try:
         obj = json.loads(content)
     except Exception:
@@ -204,11 +205,12 @@ def classify_useful(from_, subject, body, is_contact=False, is_reply=False):
             try:
                 obj = json.loads(m.group(0))
             except Exception:
-                return None, "", f"json parse error: {content[:200]}"
+                return None, "", "", f"json parse error: {content[:200]}"
         else:
-            return None, "", f"json parse error: {content[:200]}"
+            return None, "", "", f"json parse error: {content[:200]}"
     verdict = (obj.get("verdict") or "neutral").strip().lower()
     if verdict not in ("useful", "neutral", "unrelated"):
         verdict = "neutral"
     summary = (obj.get("summary") or "").strip()
-    return verdict, summary, None
+    name = (obj.get("name") or "").strip()
+    return verdict, summary, name, None
