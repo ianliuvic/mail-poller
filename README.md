@@ -10,6 +10,7 @@
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 飞书自建应用凭据 |
 | `FEISHU_RECEIVE_ID` | 通知目标（chat_id / open_id / user_id / email） |
 | `FEISHU_RECEIVE_ID_TYPE` | 默认 `chat_id` |
+| `FEISHU_VERIFICATION_TOKEN` | 飞书事件订阅的 Verification Token（用于校验回调，可留空先不校验） |
 | `POLL_INTERVAL_SECONDS` | 轮询间隔，默认 300 |
 | `STATE_FILE` | 状态文件（记录每个邮箱的 last_uid），默认 `/data/last_uid.json` |
 | `SENT_SET_FILE` | 已发送邮件索引（Message-ID + 收件人），默认 `/data/sent_set.json` |
@@ -34,4 +35,10 @@
 1. 发件人在 CAM-03 → 放行（标签「客户」）。
 2. 否则判断是否「回复我」：有 `In-Reply-To`/`References`/`Re:` 且（引用了我发出的 Message-ID，或发件人在我的发件收件人集合里）→ 放行（标签「回复」）。转发不算回复。
 3. 否则交给 LLM 判定：`useful`（泳装相关）→ 放行；`neutral`（中性）→ 放行；`unrelated`（绝对无关：SEO/推广/通知/新闻/垃圾）→ 阻挡。
-4. 放行的邮件用 LLM 生成一句中文摘要，推送到飞书。
+4. 放行的邮件用 LLM 生成一句中文摘要，推送到飞书（卡片消息，带「标记询盘/加联系人/忽略」按钮）。
+
+## 飞书事件回调
+
+- 端点：`POST /feishu/callback`（也兼容 `GET /feishu/callback?challenge=...`）。
+- 用途：接收飞书卡片按钮点击（`card.action.trigger`），`value` 里带 `{action, email, from, subject}`。
+- 在飞书开放平台给应用配置「事件订阅」时，把请求地址填为 `https://<域名>/feishu/callback`，并填写 `FEISHU_VERIFICATION_TOKEN` 环境变量。

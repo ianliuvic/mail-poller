@@ -45,6 +45,7 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
 START_FROM_UID = int(os.environ.get("START_FROM_UID", "0"))
 STATE_FILE = os.environ.get("STATE_FILE", "/data/last_uid.json")
 SENT_SET_FILE = os.environ.get("SENT_SET_FILE", "/data/sent_set.json")
+FEISHU_VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8000"))
 CONTACTS_SYNC_TZ = os.environ.get("CONTACTS_SYNC_TZ", "Asia/Shanghai")
 
@@ -82,6 +83,66 @@ def feishu_send(text):
         "receive_id": RECEIVE_ID,
         "msg_type": "text",
         "content": json.dumps({"text": text}),
+    }).encode()
+    req = urllib.request.Request(url, data=body, headers={
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+    })
+    return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+
+
+def feishu_send_card(folder_label, label, from_, subject, summary, date, email):
+    """Send an interactive card with action buttons (reply via card.action.trigger)."""
+    if not (FEISHU_APP_ID and FEISHU_APP_SECRET and RECEIVE_ID):
+        log("feishu not configured, skip send")
+        return None
+    token = feishu_token()
+    url = ("https://open.feishu.cn/open-apis/im/v1/messages"
+           "?receive_id_type=" + urllib.parse.quote(RECEIVE_ID_TYPE))
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": f"{label} · {folder_label}"},
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}",
+                },
+            },
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "✅ 标记询盘"},
+                        "type": "primary",
+                        "value": {"action": "mark_inquiry", "email": email, "from": from_, "subject": subject},
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "👤 加联系人"},
+                        "type": "default",
+                        "value": {"action": "add_contact", "email": email, "from": from_},
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "忽略"},
+                        "type": "danger",
+                        "value": {"action": "ignore", "email": email},
+                    },
+                ],
+            },
+        ],
+    }
+    body = json.dumps({
+        "receive_id": RECEIVE_ID,
+        "msg_type": "interactive",
+        "content": json.dumps(card),
     }).encode()
     req = urllib.request.Request(url, data=body, headers={
         "Authorization": "Bearer " + token,
@@ -462,10 +523,10 @@ def poll_once():
                 log(f"mail [{name}/{folder_label}] from={from_} label={label} notify={should}")
                 if not should:
                     continue
-                text = format_notify_text(folder_label, label, from_, subject, summary, item.get("date", ""))
-                log("notify:", text)
+                email = _extract_email(from_)
+                log(f"notify card: [{label}] {from_} | {subject}")
                 try:
-                    feishu_send(text)
+                    feishu_send_card(folder_label, label, from_, subject, summary, item.get("date", ""), email)
                 except Exception as e:
                     log("feishu send failed:", e)
         except Exception as e:
@@ -503,11 +564,73 @@ def contacts_sync_loop():
             time.sleep(3600)
 
 
+def handle_feishu_callback(body_bytes):
+    """Handle a Feishu event-subscription POST. Returns a JSON-serializable dict."""
+    try:
+        body = json.loads(body_bytes.decode("utf-8"))
+    except Exception as e:
+        log("feishu callback: bad json:", e)
+        return {"code": 1, "msg": "bad json"}
+
+    # URL verification (configured when saving the event subscription)
+    if body.get("type") == "url_verification":
+        return {"challenge": body.get("challenge", "")}
+
+    header = body.get("header") or {}
+    token = header.get("token") or body.get("token") or ""
+    if FEISHU_VERIFICATION_TOKEN and token and token != FEISHU_VERIFICATION_TOKEN:
+        log("feishu callback: token mismatch, ignoring")
+        return {"code": 1, "msg": "invalid token"}
+
+    event_type = header.get("event_type", "")
+    if event_type == "card.action.trigger":
+        event = body.get("event") or {}
+        action = event.get("action") or {}
+        value = action.get("value") or {}
+        operator = event.get("operator") or {}
+        log("feishu card action:", json.dumps({
+            "action": value.get("action"),
+            "email": value.get("email"),
+            "operator_open_id": operator.get("open_id", ""),
+        }, ensure_ascii=False))
+        # TODO: dispatch next step based on value.get("action") (mark_inquiry / add_contact / ignore)
+    else:
+        log("feishu callback event:", event_type)
+    return {"code": 0}
+
+
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.rstrip("/") == "/feishu/callback":
+            qs = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(qs)
+            if "challenge" in params:
+                data = json.dumps({"challenge": params["challenge"][0]}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
+
+    def do_POST(self):
+        if self.path.rstrip("/") == "/feishu/callback":
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            resp = handle_feishu_callback(raw)
+            data = json.dumps(resp).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"not found")
 
     def log_message(self, *a):
         pass
