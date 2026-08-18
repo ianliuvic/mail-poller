@@ -5,7 +5,8 @@ Config (all via environment variables, no secrets in code):
   MAILBOXES_JSON        JSON array of mailboxes:
                         [{"name":"zoho","host":"imap.zoho.com.cn","port":993,
                           "user":"x@y.com","password":"app-password",
-                          "folders":["INBOX","Notification","Newsletter","&V4NXPpCuTvY-"]}]
+                          "folders":["INBOX","Notification","Newsletter","&V4NXPpCuTvY-"],
+                          "sent_folder":"&XfJT0ZABkK5O9g-"}]
                         ("folder" is still accepted as a single-folder shorthand;
                          folder names are IMAP names, possibly modified UTF-7.)
   FEISHU_APP_ID / FEISHU_APP_SECRET
@@ -13,6 +14,7 @@ Config (all via environment variables, no secrets in code):
   FEISHU_RECEIVE_ID_TYPE   chat_id | open_id | user_id | email (default chat_id)
   POLL_INTERVAL_SECONDS    default 300
   STATE_FILE               default /data/last_uid.json
+  SENT_SET_FILE            default /data/sent_set.json (outgoing Message-IDs + recipients)
   PORT                     health HTTP port, default 8000
 """
 
@@ -26,6 +28,8 @@ import time
 import urllib.parse
 import urllib.request
 from email.header import decode_header, make_header
+from email.parser import BytesHeaderParser
+from email.utils import getaddresses
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import mailai
@@ -40,6 +44,7 @@ CONTACTS = json.loads(os.environ.get("CONTACTS_JSON", "[]"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
 START_FROM_UID = int(os.environ.get("START_FROM_UID", "0"))
 STATE_FILE = os.environ.get("STATE_FILE", "/data/last_uid.json")
+SENT_SET_FILE = os.environ.get("SENT_SET_FILE", "/data/sent_set.json")
 PORT = int(os.environ.get("PORT", "8000"))
 CONTACTS_SYNC_TZ = os.environ.get("CONTACTS_SYNC_TZ", "Asia/Shanghai")
 
@@ -221,6 +226,119 @@ def imaplib_connect(host, port, user, pwd):
     return M
 
 
+# ---------- Sent set (outgoing Message-IDs + recipients) ----------
+
+def _norm_mid(mid):
+    return (mid or "").strip().strip("<>").lower()
+
+
+def _extract_addrs(header_value):
+    if not header_value:
+        return []
+    try:
+        return [addr.lower() for _name, addr in getaddresses([header_value]) if addr and "@" in addr]
+    except Exception:
+        return []
+
+
+def load_sent_set():
+    """Return (set_data, last_uid). last_uid is None if not initialized yet."""
+    try:
+        with open(SENT_SET_FILE, "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return (
+            {
+                "message_ids": set(d.get("message_ids", [])),
+                "recipient_emails": set(d.get("recipient_emails", [])),
+            },
+            int(d.get("last_uid", 0)),
+        )
+    except Exception:
+        return {"message_ids": set(), "recipient_emails": set()}, None
+
+
+def save_sent_set(sent, last_uid):
+    d = os.path.dirname(SENT_SET_FILE)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    payload = {
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "count": len(sent["message_ids"]),
+        "recipient_count": len(sent["recipient_emails"]),
+        "last_uid": last_uid,
+        "message_ids": sorted(sent["message_ids"]),
+        "recipient_emails": sorted(sent["recipient_emails"]),
+    }
+    tmp = SENT_SET_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False)
+    os.replace(tmp, SENT_SET_FILE)
+
+
+def collect_sent(mb):
+    """Incrementally index the mailbox's Sent folder.
+
+    First run does a full backfill (builds the initial Message-ID + recipient set);
+    later runs only fetch new UIDs. Returns a stats dict, or None if no sent_folder.
+    """
+    sent_folder = mb.get("sent_folder")
+    if not sent_folder:
+        return None
+    host = mb["host"]
+    user = mb["user"]
+    pwd = mb["password"]
+    port = int(mb.get("port", 993))
+    name = mb.get("name", user)
+
+    sent, last_uid = load_sent_set()
+    M = imaplib_connect(host, port, user, pwd)
+    try:
+        try:
+            M.select(sent_folder)
+        except Exception as e:
+            log(f"sent select failed [{name}/{sent_folder}]:", e)
+            return None
+        if last_uid is None:
+            typ, data = M.uid("search", None, "ALL")
+        else:
+            typ, data = M.uid("search", None, f"UID {last_uid + 1}:*")
+        uids = [int(x) for x in data[0].split()] if data and data[0] else []
+        added = 0
+        header_parser = BytesHeaderParser()
+        for uid in uids:
+            # only need Message-ID + To/Cc headers, so fetch headers (not full body/attachments)
+            typ2, msgdata = M.uid("fetch", str(uid), "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID TO CC)])")
+            if not msgdata or not msgdata[0]:
+                continue
+            header_bytes = b""
+            for part in msgdata:
+                if isinstance(part, tuple) and len(part) >= 2 and isinstance(part[1], bytes):
+                    header_bytes += part[1]
+            if not header_bytes:
+                continue
+            msg = header_parser.parsebytes(header_bytes)
+            mid = _norm_mid(msg.get("Message-ID"))
+            if mid:
+                sent["message_ids"].add(mid)
+            for hdr in ("To", "Cc"):
+                for addr in _extract_addrs(msg.get(hdr)):
+                    sent["recipient_emails"].add(addr)
+            added += 1
+        if uids:
+            last_uid = max(uids)
+        elif last_uid is None:
+            last_uid = 0
+        save_sent_set(sent, last_uid)
+        return {
+            "added": added,
+            "message_ids": len(sent["message_ids"]),
+            "recipients": len(sent["recipient_emails"]),
+            "last_uid": last_uid,
+        }
+    finally:
+        M.logout()
+
+
 # ---------- loop ----------
 
 def poll_once():
@@ -228,6 +346,12 @@ def poll_once():
         return
     for mb in MAILBOXES:
         name = mb.get("name", mb.get("user", "?"))
+        try:
+            stats = collect_sent(mb)
+            if stats:
+                log(f"sent sync [{name}]: +{stats['added']} new | {stats['message_ids']} msg-ids | {stats['recipients']} recipients | last_uid={stats['last_uid']}")
+        except Exception as e:
+            log(f"sent collect failed [{name}]:", e)
         try:
             for item in poll_mailbox(mb):
                 from_ = item["from"]
