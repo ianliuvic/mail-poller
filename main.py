@@ -25,6 +25,7 @@ from email.header import decode_header, make_header
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import mailai
+import zoho_contacts
 
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
@@ -36,6 +37,7 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
 START_FROM_UID = int(os.environ.get("START_FROM_UID", "0"))
 STATE_FILE = os.environ.get("STATE_FILE", "/data/last_uid.json")
 PORT = int(os.environ.get("PORT", "8000"))
+CONTACTS_SYNC_TZ = os.environ.get("CONTACTS_SYNC_TZ", "Asia/Shanghai")
 
 _lock = threading.Lock()
 _token = {"value": "", "expires_at": 0}
@@ -197,6 +199,28 @@ def loop():
         time.sleep(POLL_INTERVAL)
 
 
+def contacts_sync_loop():
+    """Pull the CAM-03 contact list once at startup, then daily at 00:00 (local)."""
+    if not zoho_contacts.is_configured():
+        log("zoho contacts sync: not configured, skip")
+        return
+    try:
+        payload = zoho_contacts.sync_contacts()
+        log(f"zoho contacts sync: cached {payload['count']} contacts -> {zoho_contacts.CACHE_FILE}")
+    except Exception as e:
+        log("zoho contacts sync failed:", e)
+    while True:
+        try:
+            delay = zoho_contacts.seconds_until_next_midnight(CONTACTS_SYNC_TZ)
+            log(f"zoho contacts sync: next run in {int(delay)}s (daily 00:00 {CONTACTS_SYNC_TZ})")
+            time.sleep(delay)
+            payload = zoho_contacts.sync_contacts()
+            log(f"zoho contacts sync: cached {payload['count']} contacts -> {zoho_contacts.CACHE_FILE}")
+        except Exception as e:
+            log("zoho contacts sync error:", e)
+            time.sleep(3600)
+
+
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -210,4 +234,5 @@ class Health(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     log(f"mail-poller starting: {len(MAILBOXES)} mailbox(es), interval={POLL_INTERVAL}s, port={PORT}")
     threading.Thread(target=loop, daemon=True).start()
+    threading.Thread(target=contacts_sync_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", PORT), Health).serve_forever()

@@ -1,3 +1,11 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# local one-off analysis artifacts (not part of the app)
+inquiries.json
+sender_names.json
+recent_mails.json
+contacts_import.csv
+classify_inquiries.py
+import_contacts.py

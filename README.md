@@ -13,9 +13,15 @@
 | `POLL_INTERVAL_SECONDS` | 轮询间隔，默认 300 |
 | `STATE_FILE` | 状态文件（记录每个邮箱的 last_uid），默认 `/data/last_uid.json` |
 | `PORT` | 健康检查 HTTP 端口，默认 8000 |
+| `ZOHO_REGION` | `cn`（中国 DC）或 `com`，默认 `cn` |
+| `ZOHO_CLIENT_ID` / `ZOHO_CLIENT_SECRET` / `ZOHO_REFRESH_TOKEN` | Zoho Campaigns OAuth2 Self Client 凭据（用于拉取联系人） |
+| `CAMPAIGNS_LISTKEY` | 要缓存的邮寄列表 listkey（如 CAM-03） |
+| `CONTACTS_CACHE_FILE` | 联系人缓存文件，默认 `/data/contacts.json` |
+| `CONTACTS_SYNC_TZ` | 每日同步的时区，默认 `Asia/Shanghai` |
 
 ## 说明
 
 - 每个邮箱用 IMAP UID 去重，只推新邮件。
 - 提供 `/` 健康检查端点（返回 `ok`），供 Coolify 健康检查。
 - 邮箱密码用「应用专用密码 / 授权码」，不是登录密码。
+- 启动时会立即拉一次 CAM-03 联系人并缓存到 `CONTACTS_CACHE_FILE`，之后每天 00:00（`CONTACTS_SYNC_TZ` 时区）刷新一次。
