@@ -16,6 +16,7 @@ Config (all via environment variables, no secrets in code):
 import email
 import json
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -23,11 +24,14 @@ import urllib.request
 from email.header import decode_header, make_header
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import mailai
+
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 RECEIVE_ID = os.environ.get("FEISHU_RECEIVE_ID", "")
 RECEIVE_ID_TYPE = os.environ.get("FEISHU_RECEIVE_ID_TYPE", "chat_id")
 MAILBOXES = json.loads(os.environ.get("MAILBOXES_JSON", "[]"))
+CONTACTS = json.loads(os.environ.get("CONTACTS_JSON", "[]"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
 START_FROM_UID = int(os.environ.get("START_FROM_UID", "0"))
 STATE_FILE = os.environ.get("STATE_FILE", "/data/last_uid.json")
@@ -129,10 +133,17 @@ def poll_mailbox(mb):
             continue
         raw = msgdata[0][1]
         msg = email.message_from_bytes(raw)
+        from_ = decode_mime(msg.get("From"))
+        subject = decode_mime(msg.get("Subject"))
+        body, _ = mailai.extract_body(msg)
+        is_reply = bool(msg.get("In-Reply-To") or msg.get("References")) or \
+            (re.match(r"^\s*(re|回复|答复|fw|fwd|转发)\s*[:：]", subject or "", re.I) is not None)
         found.append({
             "uid": uid,
-            "from": decode_mime(msg.get("From")),
-            "subject": decode_mime(msg.get("Subject")),
+            "from": from_,
+            "subject": subject,
+            "body": body,
+            "is_reply": is_reply,
         })
     M.logout()
 
@@ -158,8 +169,17 @@ def poll_once():
         name = mb.get("name", mb.get("user", "?"))
         try:
             for item in poll_mailbox(mb):
-                text = f"[{name}] 📧 {item['from']}\n主题: {item['subject']}"
-                log("new mail:", text)
+                from_ = item["from"]
+                subject = item["subject"]
+                clean = mailai.strip_quotes(item["body"])
+                known = any(c and c.lower() in from_.lower() for c in CONTACTS)
+                result, err = mailai.classify_email(from_, subject, clean, known, item["is_reply"])
+                should, label, summary = mailai.decide(result, known, item["is_reply"])
+                log(f"mail [{name}] from={from_} label={label} notify={should} err={err or ''}")
+                if not should:
+                    continue
+                text = f"[{name}] {label}\n发件人: {from_}\n主题: {subject}\n摘要: {summary}"
+                log("notify:", text)
                 try:
                     feishu_send(text)
                 except Exception as e:
