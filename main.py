@@ -4,7 +4,10 @@
 Config (all via environment variables, no secrets in code):
   MAILBOXES_JSON        JSON array of mailboxes:
                         [{"name":"zoho","host":"imap.zoho.com.cn","port":993,
-                          "user":"x@y.com","password":"app-password","folder":"INBOX"}]
+                          "user":"x@y.com","password":"app-password",
+                          "folders":["INBOX","Notification","Newsletter","&V4NXPpCuTvY-"]}]
+                        ("folder" is still accepted as a single-folder shorthand;
+                         folder names are IMAP names, possibly modified UTF-7.)
   FEISHU_APP_ID / FEISHU_APP_SECRET
   FEISHU_RECEIVE_ID        target chat_id / open_id
   FEISHU_RECEIVE_ID_TYPE   chat_id | open_id | user_id | email (default chat_id)
@@ -13,6 +16,7 @@ Config (all via environment variables, no secrets in code):
   PORT                     health HTTP port, default 8000
 """
 
+import base64
 import email
 import json
 import os
@@ -112,45 +116,100 @@ def decode_mime(v):
         return str(v)
 
 
+def imap_utf7_decode(s):
+    """Decode an IMAP modified-UTF-7 folder name (e.g. '&V4NXPpCuTvY-' -> spam)."""
+    if not s:
+        return s
+    out = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "&":
+            j = s.find("-", i)
+            if j == -1:
+                out.append(s[i:])
+                break
+            if j == i + 1:  # "&-" encodes a literal ampersand
+                out.append("&")
+                i = j + 1
+                continue
+            b64 = s[i + 1:j].replace(",", "/")
+            try:
+                raw = base64.b64decode(b64 + "=" * (-len(b64) % 4))
+                out.append(raw.decode("utf-16-be", "replace"))
+            except Exception:
+                out.append(s[i:j])
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def poll_mailbox(mb):
     host = mb["host"]
     user = mb["user"]
     pwd = mb["password"]
     port = int(mb.get("port", 993))
-    folder = mb.get("folder", "INBOX")
     name = mb.get("name", user)
+    folders = mb.get("folders") or [mb.get("folder", "INBOX")]
 
     state = load_state()
-    last_uid = int(state.get(name, START_FROM_UID))
+    # migrate legacy single-key state (pre-folder support) to per-folder INBOX key
+    migrated = False
+    if name in state:
+        state.setdefault(f"{name}::INBOX", state.pop(name))
+        migrated = True
 
     M = imaplib_connect(host, port, user, pwd)
-    M.select(folder)
-    typ, data = M.uid("search", None, f"UID {last_uid + 1}:*")
-    uids = [int(x) for x in data[0].split()] if data and data[0] else []
-
     found = []
-    for uid in uids:
-        typ2, msgdata = M.uid("fetch", str(uid), "(RFC822)")
-        if not msgdata or not msgdata[0]:
+    updated = False
+    for folder in folders:
+        try:
+            M.select(folder)
+        except Exception as e:
+            log(f"select failed [{name}/{folder}]:", e)
             continue
-        raw = msgdata[0][1]
-        msg = email.message_from_bytes(raw)
-        from_ = decode_mime(msg.get("From"))
-        subject = decode_mime(msg.get("Subject"))
-        body, _ = mailai.extract_body(msg)
-        is_reply = bool(msg.get("In-Reply-To") or msg.get("References")) or \
-            (re.match(r"^\s*(re|回复|答复|fw|fwd|转发)\s*[:：]", subject or "", re.I) is not None)
-        found.append({
-            "uid": uid,
-            "from": from_,
-            "subject": subject,
-            "body": body,
-            "is_reply": is_reply,
-        })
+        key = f"{name}::{folder}"
+        if key in state:
+            last_uid = int(state[key])
+        else:
+            # First time this folder is seen: start from its current highest UID,
+            # so existing mail is NOT re-processed. To backfill later, delete this
+            # folder's key from the state file and redeploy/restart.
+            typ0, data0 = M.uid("search", None, "ALL")
+            existing = [int(x) for x in data0[0].split()] if data0 and data0[0] else []
+            last_uid = max(existing) if existing else 0
+            state[key] = last_uid
+            updated = True
+        typ, data = M.uid("search", None, f"UID {last_uid + 1}:*")
+        uids = [int(x) for x in data[0].split()] if data and data[0] else []
+
+        for uid in uids:
+            typ2, msgdata = M.uid("fetch", str(uid), "(RFC822)")
+            if not msgdata or not msgdata[0]:
+                continue
+            raw = msgdata[0][1]
+            msg = email.message_from_bytes(raw)
+            from_ = decode_mime(msg.get("From"))
+            subject = decode_mime(msg.get("Subject"))
+            body, _ = mailai.extract_body(msg)
+            is_reply = bool(msg.get("In-Reply-To") or msg.get("References")) or \
+                (re.match(r"^\s*(re|回复|答复|fw|fwd|转发)\s*[:：]", subject or "", re.I) is not None)
+            found.append({
+                "uid": uid,
+                "folder": folder,
+                "from": from_,
+                "subject": subject,
+                "body": body,
+                "is_reply": is_reply,
+            })
+        if uids:
+            state[key] = max(uids)
+            updated = True
     M.logout()
 
-    if uids:
-        state[name] = max(uids)
+    if updated or migrated:
         save_state(state)
     return found
 
@@ -173,14 +232,15 @@ def poll_once():
             for item in poll_mailbox(mb):
                 from_ = item["from"]
                 subject = item["subject"]
+                folder_label = imap_utf7_decode(item.get("folder", ""))
                 clean = mailai.strip_quotes(item["body"])
                 known = any(c and c.lower() in from_.lower() for c in CONTACTS)
                 result, err = mailai.classify_email(from_, subject, clean, known, item["is_reply"])
                 should, label, summary = mailai.decide(result, known, item["is_reply"])
-                log(f"mail [{name}] from={from_} label={label} notify={should} err={err or ''}")
+                log(f"mail [{name}/{folder_label}] from={from_} label={label} notify={should} err={err or ''}")
                 if not should:
                     continue
-                text = f"[{name}] {label}\n发件人: {from_}\n主题: {subject}\n摘要: {summary}"
+                text = f"[{name}/{folder_label}] {label}\n发件人: {from_}\n主题: {subject}\n摘要: {summary}"
                 log("notify:", text)
                 try:
                     feishu_send(text)

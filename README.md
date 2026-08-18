@@ -6,7 +6,7 @@
 
 | 变量 | 说明 |
 |---|---|
-| `MAILBOXES_JSON` | 邮箱数组：`[{"name","host","port","user","password","folder"}]` |
+| `MAILBOXES_JSON` | 邮箱数组：`[{"name","host","port","user","password","folders":[...]}]`；`folders` 是要轮询的文件夹列表（IMAP 名称），不写则默认只轮询 `INBOX` |
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 飞书自建应用凭据 |
 | `FEISHU_RECEIVE_ID` | 通知目标（chat_id / open_id / user_id / email） |
 | `FEISHU_RECEIVE_ID_TYPE` | 默认 `chat_id` |
@@ -21,7 +21,8 @@
 
 ## 说明
 
-- 每个邮箱用 IMAP UID 去重，只推新邮件。
+- 每个邮箱用 IMAP UID 去重，只推新邮件；每个文件夹独立记录 UID。
+- 文件夹名用 IMAP 名称，非 ASCII 的可能是 modified UTF-7 编码（如中文「垃圾邮件」= `&V4NXPpCuTvY-`）。
 - 提供 `/` 健康检查端点（返回 `ok`），供 Coolify 健康检查。
 - 邮箱密码用「应用专用密码 / 授权码」，不是登录密码。
 - 启动时会立即拉一次 CAM-03 联系人并缓存到 `CONTACTS_CACHE_FILE`，之后每天 00:00（`CONTACTS_SYNC_TZ` 时区）刷新一次。
