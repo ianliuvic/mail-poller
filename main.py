@@ -1104,6 +1104,37 @@ def action_guided_reply(value):
 DRAFTS_FOLDER = "&g0l6P3ux-"  # Zoho CN Drafts (modified UTF-7 of 草稿)
 REPLY_FROM_NAME = "Ian at Hongxiu"
 REPLY_FROM_ADDR = "ian@wearhongxiu.com"
+ZOHO_MAIL_ACCOUNT_ID = os.environ.get("ZOHO_MAIL_ACCOUNT_ID", "1486660000000002002")
+
+
+def _zoho_mail_save_draft(from_addr, to_addr, subject, content, in_reply_to="", ref_header=""):
+    """Save a reply draft via the Zoho Mail official API (mode=draft, NEVER sends).
+
+    inReplyTo/refHeader make Zoho treat the draft as a reply to the original message,
+    so it threads correctly when sent (equivalent to web-UI reply -> save draft).
+    """
+    token = zoho_contacts._access_token()
+    base = "https://mail.zoho.com.cn/api" if zoho_contacts.ZOHO_REGION == "cn" else "https://mail.zoho.com/api"
+    url = f"{base}/accounts/{ZOHO_MAIL_ACCOUNT_ID}/messages"
+    payload = {
+        "mode": "draft",
+        "fromAddress": from_addr,
+        "toAddress": to_addr,
+        "subject": subject,
+        "content": content,
+        "mailFormat": "plaintext",
+    }
+    if in_reply_to:
+        payload["inReplyTo"] = in_reply_to
+    if ref_header:
+        payload["refHeader"] = ref_header
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST", headers={
+        "Authorization": "Zoho-oauthtoken " + token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def _parse_mail_key(key):
@@ -1142,7 +1173,7 @@ def _quote_original(msg):
 
 
 def _do_save_draft(key):
-    """Background: build the reply email (draft + quoted history) and APPEND to Zoho Drafts."""
+    """Background: save the reviewed reply as a threaded draft via the Zoho Mail API."""
     try:
         folder, uid = _parse_mail_key(key)
         if not folder or not uid:
@@ -1169,30 +1200,20 @@ def _do_save_draft(key):
         if not re.match(r"^\s*(re|回复)\s*[:：]", reply_subject, re.I):
             reply_subject = f"Re: {reply_subject}"
 
-        reply = EmailMessage()
-        reply["From"] = f'"{REPLY_FROM_NAME}" <{REPLY_FROM_ADDR}>'
-        reply["To"] = to_value
-        reply["Subject"] = reply_subject
-        if msg_id:
-            reply["In-Reply-To"] = msg_id
-            reply["References"] = (refs + " " + msg_id).strip()
-        reply["Date"] = format_datetime(datetime.datetime.now())
-        reply["Message-ID"] = make_msgid(domain="wearhongxiu.com")
-        reply.set_content(
+        content = (
             f"{draft}\n\n发件人: {from_}\n到: {REPLY_FROM_ADDR}\n日期: {date}\n主题: {subject}\n\n{_quote_original(msg)}"
         )
+        ref_header = (refs + " " + msg_id).strip() if msg_id else refs
 
-        mb = MAILBOXES[0]
-        M = imaplib_connect(mb["host"], int(mb.get("port", 993)), mb["user"], mb["password"])
-        try:
-            M.append(DRAFTS_FOLDER, r"\Drafts", None, reply.as_bytes())
-            log(f"draft saved to Zoho Drafts: {to_value} | {reply_subject}")
-            feishu_send(
-                f"✅ 已存入 Zoho 草稿箱\n致：{to_value}\n主题：{reply_subject}\n"
-                "（草稿未发送；可在 Zoho Mail 草稿箱编辑后自行发送）"
-            )
-        finally:
-            M.logout()
+        resp = _zoho_mail_save_draft(
+            REPLY_FROM_ADDR, to_value, reply_subject, content,
+            in_reply_to=msg_id, ref_header=ref_header,
+        )
+        log(f"draft saved via Zoho API: {to_value} | {reply_subject} | inReplyTo={bool(msg_id)} | resp={json.dumps(resp, ensure_ascii=False)[:160]}")
+        feishu_send(
+            f"✅ 已存入 Zoho 草稿箱（作为原邮件回复）\n致：{to_value}\n主题：{reply_subject}\n"
+            "（草稿未发送；可在 Zoho Mail 草稿箱编辑后发送）"
+        )
     except Exception as e:
         log("save_draft failed:", e)
         try:
