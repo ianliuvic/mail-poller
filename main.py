@@ -46,6 +46,7 @@ START_FROM_UID = int(os.environ.get("START_FROM_UID", "0"))
 STATE_FILE = os.environ.get("STATE_FILE", "/data/last_uid.json")
 SENT_SET_FILE = os.environ.get("SENT_SET_FILE", "/data/sent_set.json")
 FEISHU_VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN", "")
+MAIL_CACHE_FILE = os.environ.get("MAIL_CACHE_FILE", "/data/mail_cache.json")
 PORT = int(os.environ.get("PORT", "8000"))
 CONTACTS_SYNC_TZ = os.environ.get("CONTACTS_SYNC_TZ", "Asia/Shanghai")
 
@@ -91,14 +92,30 @@ def feishu_send(text):
     return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
 
 
-def feishu_send_card(folder_label, label, from_, subject, summary, date, email, name="", show_buttons=False):
-    """Send an interactive card. Buttons only shown for explicit stranger inquiries."""
+def feishu_send_card(folder_label, label, from_, subject, summary, date, email, name="", show_buttons=False, key=""):
+    """Send an interactive card. 'view original' on every card; 'add to CAM-03'
+    only on explicit stranger inquiries (show_buttons=True)."""
     if not (FEISHU_APP_ID and FEISHU_APP_SECRET and RECEIVE_ID):
         log("feishu not configured, skip send")
         return None
     token = feishu_token()
     url = ("https://open.feishu.cn/open-apis/im/v1/messages"
            "?receive_id_type=" + urllib.parse.quote(RECEIVE_ID_TYPE))
+    actions = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "📄 查看原文"},
+            "type": "default",
+            "value": {"action": "view_original", "key": key},
+        },
+    ]
+    if show_buttons:
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "➕ 加入 CAM-03"},
+            "type": "primary",
+            "value": {"action": "add_contact", "email": email, "name": name, "from": from_, "subject": subject},
+        })
     elements = [
         {
             "tag": "div",
@@ -107,20 +124,9 @@ def feishu_send_card(folder_label, label, from_, subject, summary, date, email, 
                 "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}",
             },
         },
+        {"tag": "hr"},
+        {"tag": "action", "actions": actions},
     ]
-    if show_buttons:
-        elements.append({"tag": "hr"})
-        elements.append({
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "➕ 加入 CAM-03"},
-                    "type": "primary",
-                    "value": {"action": "add_contact", "email": email, "name": name, "from": from_, "subject": subject},
-                },
-            ],
-        })
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -159,6 +165,42 @@ def save_state(state):
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(state, fh)
     os.replace(tmp, STATE_FILE)
+
+
+# ---------- mail cache (for "view original" button) ----------
+
+def load_mail_cache():
+    try:
+        with open(MAIL_CACHE_FILE, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def save_mail_cache(cache):
+    d = os.path.dirname(MAIL_CACHE_FILE)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = MAIL_CACHE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(cache, fh, ensure_ascii=False)
+    os.replace(tmp, MAIL_CACHE_FILE)
+
+
+def cache_mail(key, from_, subject, date, folder, body, max_entries=100):
+    """Cache an email's body so the 'view original' button can retrieve it later."""
+    cache = load_mail_cache()
+    cache[key] = {
+        "from": from_,
+        "subject": subject,
+        "date": date,
+        "folder": folder,
+        "body": (body or "")[:6000],
+    }
+    if len(cache) > max_entries:
+        for k in list(cache)[:len(cache) - max_entries]:
+            cache.pop(k, None)
+    save_mail_cache(cache)
 
 
 # ---------- IMAP ----------
@@ -531,8 +573,13 @@ def poll_once():
                     continue
                 email = _extract_email(from_)
                 log(f"notify card: [{r['label']}] {from_} | {subject}")
+                key = f"{item.get('folder', '')}::{item.get('uid', '')}"
                 try:
-                    feishu_send_card(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], r["buttons"])
+                    cache_mail(key, from_, subject, item.get("date", ""), folder_label, item.get("body", ""))
+                except Exception as e:
+                    log("mail cache write failed:", e)
+                try:
+                    feishu_send_card(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], r["buttons"], key)
                 except Exception as e:
                     log("feishu send failed:", e)
         except Exception as e:
@@ -601,6 +648,33 @@ def action_add_contact(value):
     except Exception as e:
         log("add_contact failed:", e)
         return {"toast": {"type": "error", "content": f"加入失败：{e}"}}
+
+
+@register_action("view_original")
+def action_view_original(value):
+    """Send the cached email body back to the user via Feishu."""
+    key = value.get("key", "")
+    entry = load_mail_cache().get(key)
+    if not entry:
+        return {"toast": {"type": "error", "content": "原文不存在或已过期"}}
+    body = entry.get("body", "")
+    truncated = len(body) >= 6000
+    text = (
+        f"📄 邮件原文\n"
+        f"发件人：{entry.get('from', '')}\n"
+        f"主题：{entry.get('subject', '')}\n"
+        f"时间：{entry.get('date', '')}\n"
+        f"文件夹：{entry.get('folder', '')}\n"
+        + ("（正文过长，已截断）\n" if truncated else "")
+        + "————————————\n"
+        + (body if body else "（无正文）")
+    )
+    try:
+        feishu_send(text)
+        return {"toast": {"type": "success", "content": "原文已发送"}}
+    except Exception as e:
+        log("view_original send failed:", e)
+        return {"toast": {"type": "error", "content": f"发送失败：{e}"}}
 
 
 def handle_feishu_callback(body_bytes):
