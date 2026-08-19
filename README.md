@@ -57,5 +57,6 @@
 - 按钮动作通过 `ACTION_HANDLERS` 注册表分发（`@register_action("xxx")`），便于扩展；当前内置：
   - `view_original`：把缓存的邮件正文（`/data/mail_cache.json`，截断 6000 字）作为消息发到飞书；
   - `add_contact`：把邮箱 + LLM 提取的姓名加入 CAM-03，并刷新本地联系人缓存；
-  - `draft_reply`：陌生询盘卡片上的「✍️ 自动回复」——后台用 `voice.md`（声音）+ `reply-rules.md`（规则）+ `knowledge/` 业务知识生成回复草稿推给你审核，**不自动发送**。
+  - `draft_reply`：陌生询盘卡片上的「✍️ 自动回复」——后台用 `voice.md`（声音）+ `reply-rules.md`（规则）+ `knowledge/` 业务知识生成回复草稿推给你审核，**不自动发送**；
+  - `guided_reply`：询盘卡片底部「指导意见」多行输入框（卡片 JSON 2.0 textarea）——你输入观点后点「生成指导型回复」，LLM 结合你的指导意见生成草稿推给你，同样不发送。
 - 在飞书开放平台给应用配置「事件订阅」时，把请求地址填为 `https://<域名>/feishu/callback`，并填写 `FEISHU_VERIFICATION_TOKEN` 环境变量。

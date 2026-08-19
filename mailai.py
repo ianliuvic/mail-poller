@@ -219,7 +219,7 @@ def classify_useful(from_, subject, body, is_contact=False, is_reply=False):
 
 # ---------- reply draft generation ----------
 
-def draft_reply(from_, subject, body, knowledge_text, sample_text, voice_text, rules_text):
+def draft_reply(from_, subject, body, knowledge_text, sample_text, voice_text, rules_text, guide=""):
     """Generate a reply draft in Ian's voice. Returns (draft_text, error)."""
     if not DEEPSEEK_API_KEY:
         return None, "no deepseek key"
@@ -238,6 +238,10 @@ def draft_reply(from_, subject, body, knowledge_text, sample_text, voice_text, r
         f"Business knowledge to use (authoritative facts - MOQ, pricing, lead time, fabric etc.):\n{knowledge_text[:14000]}\n\n"
         f"Style reference (imitate tone and structure, do NOT copy its content):\n{sample_text[:2500]}"
     )
+    if guide and guide.strip():
+        user_msg += (
+            f"\n\nIan's guidance for THIS reply (must be followed strictly, incorporate all of it):\n{guide.strip()[:1500]}"
+        )
     payload = {
         "model": DEEPSEEK_REPLY_MODEL,
         "messages": [

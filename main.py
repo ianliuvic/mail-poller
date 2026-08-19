@@ -163,6 +163,43 @@ def feishu_send_card(folder_label, label, from_, subject, summary, date, email, 
     return feishu_post_card(card)
 
 
+def feishu_send_inquiry_card_v2(folder_label, label, from_, subject, summary, date, email, name, key):
+    """Card JSON 2.0 for stranger inquiries: normal buttons + a multi-line guidance
+    form whose submit triggers a 'guided_reply' (guide text comes back in form_value)."""
+    card = {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": f"{label} · {folder_label}"}},
+        "body": {
+            "direction": "vertical",
+            "elements": [
+                {"tag": "div", "text": {"tag": "plain_text",
+                 "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}"}},
+                {"tag": "hr"},
+                {"tag": "action", "actions": [
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "📄 查看原文"}, "type": "default",
+                     "value": {"action": "view_original", "key": key}},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "✍️ 自动回复"}, "type": "default",
+                     "value": {"action": "draft_reply", "key": key}},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "➕ 加入 CAM-03"}, "type": "primary",
+                     "value": {"action": "add_contact", "email": email, "name": name, "from": from_, "subject": subject}},
+                ]},
+                {"tag": "hr"},
+                {"tag": "form", "name": "guide_form", "elements": [
+                    {"tag": "input", "name": "guide_input", "input_type": "multiline_text", "rows": 3,
+                     "auto_resize": True, "max_length": 1000,
+                     "label": {"tag": "plain_text", "content": "💡 指导意见（可选，可多行）"},
+                     "placeholder": {"tag": "plain_text", "content": "例如：强调交期优势；报价区间 8-10 USD；附面料样卡"}},
+                    {"tag": "button", "name": "submit_guide", "text": {"tag": "plain_text", "content": "✍️ 生成指导型回复"},
+                     "type": "primary", "action_type": "form_submit",
+                     "value": {"action": "guided_reply", "key": key}},
+                ]},
+            ],
+        },
+    }
+    return feishu_post_card(card)
+
+
 # ---------- state ----------
 
 def load_state():
@@ -600,7 +637,10 @@ def poll_once():
                 except Exception as e:
                     log("mail cache write failed:", e)
                 try:
-                    feishu_send_card(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], r["buttons"], key)
+                    if r["buttons"]:
+                        feishu_send_inquiry_card_v2(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], key)
+                    else:
+                        feishu_send_card(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], r["buttons"], key)
                 except Exception as e:
                     log("feishu send failed:", e)
         except Exception as e:
@@ -976,8 +1016,8 @@ def action_view_original(value):
         return {"toast": {"type": "error", "content": f"发送失败：{e}"}}
 
 
-def _do_draft_reply(key):
-    """Background: build a reply draft (voice + rules + knowledge) and send it to Feishu."""
+def _do_draft_reply(key, guide=""):
+    """Background: build a reply draft (voice + rules + knowledge [+ guide]) and send it to Feishu."""
     try:
         entry = load_mail_cache().get(key)
         if not entry:
@@ -991,7 +1031,7 @@ def _do_draft_reply(key):
         knowledge = load_knowledge_for(text)
         voice, rules = load_voice_and_rules()
         sample = load_sample_reply(categories)
-        draft, err = mailai.draft_reply(from_, subject, body, knowledge, sample, voice, rules)
+        draft, err = mailai.draft_reply(from_, subject, body, knowledge, sample, voice, rules, guide)
         if err or not draft:
             feishu_send(f"❌ 草稿生成失败：{err or '空结果'}")
             return
@@ -1003,9 +1043,10 @@ def _do_draft_reply(key):
                 save_mail_cache(cache)
         except Exception as e:
             log("draft cache save failed:", e)
+        guided = bool(guide and guide.strip())
         card = {
             "config": {"wide_screen_mode": True},
-            "header": {"template": "blue", "title": {"tag": "plain_text", "content": "✍️ 回复草稿"}},
+            "header": {"template": "blue", "title": {"tag": "plain_text", "content": "✍️ 指导型回复草稿" if guided else "✍️ 回复草稿"}},
             "elements": [
                 {"tag": "div", "text": {"tag": "plain_text", "content": f"致：{from_}\n建议主题：Re: {subject}\n\n{draft}"}},
                 {"tag": "hr"},
@@ -1018,7 +1059,7 @@ def _do_draft_reply(key):
         }
         try:
             feishu_post_card(card)
-            log(f"draft card sent: {len(draft)} chars, for {from_}")
+            log(f"draft card sent: {len(draft)} chars, for {from_}" + (" (guided)" if guided else ""))
         except Exception as e:
             log("draft card send failed:", e)
     except Exception as e:
@@ -1038,6 +1079,21 @@ def action_draft_reply(value):
     log_stats({"type": "action", "action": "draft_reply", "key": key})
     threading.Thread(target=_do_draft_reply, args=(key,), daemon=True).start()
     return {"toast": {"type": "info", "content": "正在生成回复草稿…"}}
+
+
+@register_action("guided_reply")
+def action_guided_reply(value):
+    """Generate a reply draft following the user's typed guidance (multi-line form input)."""
+    key = (value.get("key") or "").strip()
+    form_value = value.get("form_value") or {}
+    guide = (form_value.get("guide_input") or "").strip() if isinstance(form_value, dict) else ""
+    if not key:
+        return {"toast": {"type": "error", "content": "缺少邮件标识"}}
+    if not guide:
+        return {"toast": {"type": "error", "content": "请先输入指导意见"}}
+    log_stats({"type": "action", "action": "guided_reply", "key": key})
+    threading.Thread(target=_do_draft_reply, args=(key, guide), daemon=True).start()
+    return {"toast": {"type": "info", "content": "正在按指导意见生成草稿…"}}
 
 
 # ---------- save draft to Zoho (never send) ----------
@@ -1176,6 +1232,11 @@ def handle_feishu_callback(body_bytes):
         event = body.get("event") or {}
         action = event.get("action") or {}
         value = action.get("value") or {}
+        if not isinstance(value, dict):
+            value = {"raw": value}
+        form_value = action.get("form_value") or {}
+        if isinstance(form_value, dict):
+            value["form_value"] = form_value  # expose form inputs to handlers
         operator = event.get("operator") or {}
         log("feishu card action:", json.dumps({
             "action": value.get("action"),
