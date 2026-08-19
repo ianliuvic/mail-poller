@@ -50,5 +50,6 @@
 - 用途：接收飞书卡片按钮点击（`card.action.trigger`），`value` 里带 `{action, email, name, from, subject}`。
 - 按钮动作通过 `ACTION_HANDLERS` 注册表分发（`@register_action("xxx")`），便于扩展；当前内置：
   - `view_original`：把缓存的邮件正文（`/data/mail_cache.json`，截断 6000 字）作为消息发到飞书；
-  - `add_contact`：把邮箱 + LLM 提取的姓名加入 CAM-03，并刷新本地联系人缓存。
+  - `add_contact`：把邮箱 + LLM 提取的姓名加入 CAM-03，并刷新本地联系人缓存；
+  - `draft_reply`：陌生询盘卡片上的「✍️ 自动回复」——后台用 `voice.md`（声音）+ `reply-rules.md`（规则）+ `knowledge/` 业务知识生成回复草稿推给你审核，**不自动发送**。
 - 在飞书开放平台给应用配置「事件订阅」时，把请求地址填为 `https://<域名>/feishu/callback`，并填写 `FEISHU_VERIFICATION_TOKEN` 环境变量。

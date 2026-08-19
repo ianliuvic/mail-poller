@@ -112,6 +112,12 @@ def feishu_send_card(folder_label, label, from_, subject, summary, date, email, 
     if show_buttons:
         actions.append({
             "tag": "button",
+            "text": {"tag": "plain_text", "content": "✍️ 自动回复"},
+            "type": "default",
+            "value": {"action": "draft_reply", "key": key},
+        })
+        actions.append({
+            "tag": "button",
             "text": {"tag": "plain_text", "content": "➕ 加入 CAM-03"},
             "type": "primary",
             "value": {"action": "add_contact", "email": email, "name": name, "from": from_, "subject": subject},
@@ -617,6 +623,74 @@ def contacts_sync_loop():
             time.sleep(3600)
 
 
+# ---------- knowledge pack (reply-draft context) ----------
+
+KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge")
+
+CATEGORY_KEYWORDS = {
+    "pricing-moq": ["moq", "price", "pricing", "quote", "cost", "budget", "报价", "价格", "起订量"],
+    "fabric-trims": ["fabric", "spandex", "nylon", "polyester", "trim", "print", "面料", "材质", "辅料"],
+    "sampling": ["sample", "sampling", "prototype", "打样", "样品", "样衣"],
+    "quality-production": ["quality", "inspection", "production", "lead time", "交期", "生产", "质检"],
+    "logistics-payment": ["shipping", "logistic", "delivery", "payment", "deposit", "fob", "ddu", "运输", "付款", "物流", "海运"],
+    "oem-private-label": ["oem", "odm", "private label", "custom", "贴牌", "定制"],
+    "sales-channels": ["dropshipping", "wholesale", "retail", "分销", "批发"],
+    "guides": ["size", "color", "尺码", "颜色", "色卡"],
+}
+
+
+def _read_file(path, default=""):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except Exception:
+        return default
+
+
+def load_voice_and_rules():
+    return (
+        _read_file(os.path.join(KNOWLEDGE_DIR, "voice.md")),
+        _read_file(os.path.join(KNOWLEDGE_DIR, "reply-rules.md")),
+    )
+
+
+def select_knowledge_categories(text):
+    text = (text or "").lower()
+    matched = [cat for cat, kws in CATEGORY_KEYWORDS.items() if any(k in text for k in kws)]
+    return matched or ["pricing-moq", "logistics-payment"]
+
+
+def load_knowledge_for(text, max_chars=14000):
+    """Load knowledge .md files whose 分类 matches the email's topic categories."""
+    cats = set(select_knowledge_categories(text))
+    parts, used = [], 0
+    try:
+        names = sorted(os.listdir(KNOWLEDGE_DIR))
+    except Exception:
+        names = []
+    for fname in names:
+        if not fname.endswith(".md") or fname == "INDEX.md":
+            continue
+        content = _read_file(os.path.join(KNOWLEDGE_DIR, fname))
+        if not content or not any(f"分类：{cat}" in content for cat in cats):
+            continue
+        if used + len(content) > max_chars:
+            continue
+        parts.append(content)
+        used += len(content)
+    return "\n\n---\n\n".join(parts)
+
+
+def load_sample_reply(categories):
+    if "sampling" in categories:
+        fname = "sample-order-reply.md"
+    elif "pricing-moq" in categories:
+        fname = "moq-pricing-reply.md"
+    else:
+        fname = "rfq-detailed-reply.md"
+    return _read_file(os.path.join(KNOWLEDGE_DIR, "reply-samples", fname))
+
+
 # ---------- Feishu card action dispatch ----------
 
 ACTION_HANDLERS = {}
@@ -699,6 +773,51 @@ def action_view_original(value):
     except Exception as e:
         log("view_original send failed:", e)
         return {"toast": {"type": "error", "content": f"发送失败：{e}"}}
+
+
+def _do_draft_reply(key):
+    """Background: build a reply draft (voice + rules + knowledge) and send it to Feishu."""
+    try:
+        entry = load_mail_cache().get(key)
+        if not entry:
+            feishu_send("❌ 找不到该邮件（缓存可能已过期）")
+            return
+        from_ = entry.get("from", "")
+        subject = entry.get("subject", "")
+        body = entry.get("body", "")
+        text = f"{subject}\n{body}"
+        categories = select_knowledge_categories(text)
+        knowledge = load_knowledge_for(text)
+        voice, rules = load_voice_and_rules()
+        sample = load_sample_reply(categories)
+        draft, err = mailai.draft_reply(from_, subject, body, knowledge, sample, voice, rules)
+        if err or not draft:
+            feishu_send(f"❌ 草稿生成失败：{err or '空结果'}")
+            return
+        msg = (
+            f"✍️ 回复草稿（致 {from_}）\n"
+            f"建议主题：Re: {subject}\n"
+            "————————————\n"
+            f"{draft}\n"
+            "————————————\n⚠️ 草稿未发送，请人工核对后自行发送"
+        )
+        feishu_send(msg)
+    except Exception as e:
+        log("draft_reply failed:", e)
+        try:
+            feishu_send(f"❌ 草稿生成失败：{e}")
+        except Exception:
+            pass
+
+
+@register_action("draft_reply")
+def action_draft_reply(value):
+    """Generate a reply draft for a cached stranger inquiry (background, no auto-send)."""
+    key = (value.get("key") or "").strip()
+    if not key:
+        return {"toast": {"type": "error", "content": "缺少邮件标识"}}
+    threading.Thread(target=_do_draft_reply, args=(key,), daemon=True).start()
+    return {"toast": {"type": "info", "content": "正在生成回复草稿…"}}
 
 
 def handle_feishu_callback(body_bytes):

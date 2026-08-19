@@ -17,6 +17,7 @@ from html.parser import HTMLParser
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+DEEPSEEK_REPLY_MODEL = os.environ.get("DEEPSEEK_REPLY_MODEL", "deepseek-v4-pro")
 MAX_BODY_CHARS = 3000
 
 
@@ -214,3 +215,46 @@ def classify_useful(from_, subject, body, is_contact=False, is_reply=False):
     summary = (obj.get("summary") or "").strip()
     name = (obj.get("name") or "").strip()
     return verdict, summary, name, None
+
+
+# ---------- reply draft generation ----------
+
+def draft_reply(from_, subject, body, knowledge_text, sample_text, voice_text, rules_text):
+    """Generate a reply draft in Ian's voice. Returns (draft_text, error)."""
+    if not DEEPSEEK_API_KEY:
+        return None, "no deepseek key"
+    system = (
+        "You are drafting a business reply email for Ian, Operations Manager at Hongxiu "
+        "Clothing Co., Ltd. (a Chinese swimwear and yogawear manufacturer).\n"
+        "Write in the SAME language as the customer's email.\n"
+        "Follow Ian's voice and reply rules strictly - they are authoritative:\n\n"
+        f"{voice_text}\n\n{rules_text}\n\n"
+        "Output ONLY the reply email body, from greeting to signature. No commentary, "
+        "no markdown fences. Where an attachment or link would go, write a placeholder "
+        "like [附：目录] / [附：价格表] for the human to fill in."
+    )
+    user_msg = (
+        f"Customer email to reply to:\nFrom: {from_}\nSubject: {subject}\nBody:\n{(body or '')[:4000]}\n\n"
+        f"Business knowledge to use (authoritative facts - MOQ, pricing, lead time, fabric etc.):\n{knowledge_text[:14000]}\n\n"
+        f"Style reference (imitate tone and structure, do NOT copy its content):\n{sample_text[:2500]}"
+    )
+    payload = {
+        "model": DEEPSEEK_REPLY_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.5,
+    }
+    url = DEEPSEEK_BASE_URL.rstrip("/") + "/chat/completions"
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={
+        "Authorization": "Bearer " + DEEPSEEK_API_KEY,
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        draft = d["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return None, f"llm error: {e}"
+    return draft, None
