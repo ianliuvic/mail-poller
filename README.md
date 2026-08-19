@@ -30,6 +30,12 @@
 - 邮箱密码用「应用专用密码 / 授权码」，不是登录密码。
 - 启动时会立即拉一次 CAM-03 联系人并缓存到 `CONTACTS_CACHE_FILE`，之后每天 00:00（`CONTACTS_SYNC_TZ` 时区）刷新一次。
 
+## 知识库（自动回复上下文）
+
+- `knowledge/` 是从 Wear Hongxiu WordPress 拉取的**精选业务知识**（OEM/私标、面料、打样、MOQ/报价、物流付款、质检、尺码等 24 篇，纯 Markdown），用于后续自动回复撰写，不依赖 RAG。
+- 刷新：`python scripts/fetch_knowledge.py`（只读 WP REST；凭据用 `WORDPRESS_BASE_URL`/`WORDPRESS_USERNAME`/`WORDPRESS_APPLICATION_PASSWORD` 环境变量，或 `WORDPRESS_ENV_FILE` 指向 .env）。
+- 文件清单见 `knowledge/INDEX.md`；容器内路径 `/app/knowledge/`。
+
 ## 处理流程（每封新邮件）
 
 1. 发件人在 CAM-03 → 放行（标签「客户」）。
