@@ -801,7 +801,11 @@ def _do_draft_reply(key):
             f"{draft}\n"
             "————————————\n⚠️ 草稿未发送，请人工核对后自行发送"
         )
-        feishu_send(msg)
+        try:
+            feishu_send(msg)
+            log(f"draft sent: {len(draft)} chars, for {from_}")
+        except Exception as e:
+            log("draft feishu send failed:", e)
     except Exception as e:
         log("draft_reply failed:", e)
         try:
