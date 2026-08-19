@@ -30,6 +30,12 @@
 - 邮箱密码用「应用专用密码 / 授权码」，不是登录密码。
 - 启动时会立即拉一次 CAM-03 联系人并缓存到 `CONTACTS_CACHE_FILE`，之后每天 00:00（`CONTACTS_SYNC_TZ` 时区）刷新一次。
 
+## 每周邮件报告
+
+- **实时记账**：每处理一封邮件（含标签/文件夹/是否推送/摘要）和每次按钮操作都会追加到 `MAIL_STATS_FILE`（默认 `/data/mail_stats.jsonl`）。
+- **每周日 08:00（Asia/Shanghai）**生成周报：总览（收件/推送/过滤/垃圾捞回）、询盘话题、Top 发件人、按钮操作统计 + DeepSeek AI 洞察，以飞书卡片推送，明细归档到 `REPORTS_DIR`（默认 `/data/reports/`）。
+- 从启用之日起积累数据；此前邮件无历史统计。
+
 ## 知识库（自动回复上下文）
 
 - `knowledge/` 是从 Wear Hongxiu WordPress 拉取的**精选业务知识**（OEM/私标、面料、打样、MOQ/报价、物流付款、质检、尺码等 24 篇，纯 Markdown），用于后续自动回复撰写，不依赖 RAG。

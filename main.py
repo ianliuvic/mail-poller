@@ -33,6 +33,7 @@ from email.message import EmailMessage
 from email.parser import BytesHeaderParser
 from email.utils import getaddresses, format_datetime, make_msgid, parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from zoneinfo import ZoneInfo
 
 import mailai
 import zoho_contacts
@@ -49,6 +50,8 @@ STATE_FILE = os.environ.get("STATE_FILE", "/data/last_uid.json")
 SENT_SET_FILE = os.environ.get("SENT_SET_FILE", "/data/sent_set.json")
 FEISHU_VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN", "")
 MAIL_CACHE_FILE = os.environ.get("MAIL_CACHE_FILE", "/data/mail_cache.json")
+MAIL_STATS_FILE = os.environ.get("MAIL_STATS_FILE", "/data/mail_stats.jsonl")
+REPORTS_DIR = os.environ.get("REPORTS_DIR", "/data/reports")
 PORT = int(os.environ.get("PORT", "8000"))
 CONTACTS_SYNC_TZ = os.environ.get("CONTACTS_SYNC_TZ", "Asia/Shanghai")
 
@@ -582,9 +585,14 @@ def poll_once():
                 folder_label = _folder_display(item.get("folder", ""))
                 r = process_mail(item, contacts_emails, sent_mids, sent_recipients)
                 log(f"mail [{name}/{folder_label}] from={from_} label={r['label']} notify={r['should']} buttons={r['buttons']}")
+                email = _extract_email(from_)
+                log_stats({
+                    "type": "mail", "folder": folder_label, "from": from_, "email": email,
+                    "subject": subject, "label": r["label"], "notify": r["should"],
+                    "summary": r["summary"],
+                })
                 if not r["should"]:
                     continue
-                email = _extract_email(from_)
                 log(f"notify card: [{r['label']}] {from_} | {subject}")
                 key = f"{item.get('folder', '')}::{item.get('uid', '')}"
                 try:
@@ -627,6 +635,190 @@ def contacts_sync_loop():
             log(f"zoho contacts sync: cached {payload['count']} contacts -> {zoho_contacts.CACHE_FILE}")
         except Exception as e:
             log("zoho contacts sync error:", e)
+            time.sleep(3600)
+
+
+# ---------- mail stats (weekly report data) ----------
+
+_stats_lock = threading.Lock()
+
+
+def log_stats(event):
+    """Append one event (mail or action) to the JSONL stats file."""
+    try:
+        event = dict(event)
+        event.setdefault("ts", time.strftime("%Y-%m-%d %H:%M:%S"))
+        with _stats_lock:
+            d = os.path.dirname(MAIL_STATS_FILE)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(MAIL_STATS_FILE, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log("log_stats failed:", e)
+
+
+def _topic_bucket(text):
+    t = (text or "").lower()
+    for cat, kws in CATEGORY_KEYWORDS.items():
+        if any(k in t for k in kws):
+            return cat
+    return "other"
+
+
+def _aggregate_week(records):
+    agg = {
+        "total": 0, "by_folder": {}, "by_label": {}, "notify": 0, "filtered": 0,
+        "spam_recovered": 0, "top_senders": {}, "topics": {}, "actions": {},
+    }
+    for r in records:
+        if r.get("type") == "action":
+            action = r.get("action", "?")
+            agg["actions"][action] = agg["actions"].get(action, 0) + 1
+            continue
+        agg["total"] += 1
+        folder = r.get("folder", "?")
+        agg["by_folder"][folder] = agg["by_folder"].get(folder, 0) + 1
+        label = r.get("label", "?")
+        agg["by_label"][label] = agg["by_label"].get(label, 0) + 1
+        if r.get("notify"):
+            agg["notify"] += 1
+            if folder == "垃圾邮件":
+                agg["spam_recovered"] += 1
+        else:
+            agg["filtered"] += 1
+        email = r.get("email") or ""
+        if email:
+            agg["top_senders"][email] = agg["top_senders"].get(email, 0) + 1
+        if label == "泳装相关":
+            topic = _topic_bucket(f"{r.get('subject', '')} {r.get('summary', '')}")
+            agg["topics"][topic] = agg["topics"].get(topic, 0) + 1
+    return agg
+
+
+def _load_stats_window(since_ts):
+    records = []
+    try:
+        with open(MAIL_STATS_FILE, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if since_ts and rec.get("ts", "") < since_ts:
+                    continue
+                records.append(rec)
+    except Exception:
+        pass
+    return records
+
+
+def seconds_until_sunday_8am(tz_name):
+    tz = ZoneInfo(tz_name)
+    now = datetime.datetime.now(tz)
+    days_ahead = (6 - now.weekday()) % 7  # days until next Sunday
+    nxt = (now + datetime.timedelta(days=days_ahead)).replace(hour=8, minute=0, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += datetime.timedelta(days=7)
+    return max(1.0, (nxt - now).total_seconds())
+
+
+def generate_weekly_report():
+    """Aggregate the past week's stats, add LLM insights, send a Feishu card + archive."""
+    tz = ZoneInfo("Asia/Shanghai")
+    now = datetime.datetime.now(tz)
+    since = (now - datetime.timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    records = _load_stats_window(since)
+    agg = _aggregate_week(records)
+
+    by_folder, by_label = agg["by_folder"], agg["by_label"]
+    overview = (
+        f"**收件总数：{agg['total']}**\n"
+        f"收件箱 {by_folder.get('收件箱', 0)} ｜ 通知 {by_folder.get('通知', 0)} ｜ "
+        f"订阅 {by_folder.get('订阅', 0)} ｜ 垃圾 {by_folder.get('垃圾邮件', 0)}\n"
+        f"有效推送 {agg['notify']} ｜ 过滤 {agg['filtered']}"
+        + (f" ｜ 垃圾中捞回 {agg['spam_recovered']}" if agg['spam_recovered'] else "")
+    )
+    labels = " ｜ ".join(
+        f"{name} {by_label.get(name, 0)}" for name in ("泳装相关", "客户", "回复", "中性", "未知") if by_label.get(name)
+    )
+    if labels:
+        overview += f"\n{labels}"
+
+    topic_labels = {
+        "pricing-moq": "报价/MOQ", "fabric-trims": "面料/辅料", "sampling": "打样",
+        "quality-production": "生产/质检", "logistics-payment": "物流/付款",
+        "oem-private-label": "OEM/私标", "sales-channels": "批发/分销",
+        "guides": "尺码/颜色", "other": "其他",
+    }
+    topics = "、".join(f"{topic_labels.get(k, k)} {v}" for k, v in sorted(agg['topics'].items(), key=lambda x: -x[1])) or "（无）"
+    top_senders = sorted(agg["top_senders"].items(), key=lambda x: -x[1])[:5]
+    senders = "、".join(f"{em.split('@')[0]}×{n}" for em, n in top_senders) or "（无）"
+    action_labels = {
+        "view_original": "查看原文", "draft_reply": "自动回复", "save_draft": "存入草稿", "add_contact": "加入CAM-03",
+    }
+    actions = " ｜ ".join(
+        f"{action_labels.get(k, k)} {v}" for k, v in sorted(agg['actions'].items(), key=lambda x: -x[1])
+    ) or "（无）"
+
+    insight_lines = [
+        f"[{r.get('label', '')}] {r.get('email', '')} | {r.get('subject', '')[:60]} | {r.get('summary', '')[:100]}"
+        for r in records if r.get("type") == "mail" and r.get("notify")
+    ]
+    insights = "（本周数据较少，暂不生成洞察）"
+    if insight_lines:
+        try:
+            insights = mailai.weekly_insights("\n".join(insight_lines[-200:]))
+        except Exception as e:
+            log("weekly insights failed:", e)
+
+    date_range = f"{since[:10]} ~ {now.strftime('%Y-%m-%d')}"
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": f"📊 本周邮件分析 · {date_range}"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": overview}},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**询盘话题：** {topics}\n**Top 发件人：** {senders}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**按钮操作：** {actions}"}},
+            {"tag": "note", "elements": [{"tag": "lark_md", "content": f"**AI 洞察**\n{insights}"}]},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": f"区间：{date_range}（Asia/Shanghai）；明细已归档 /data/reports/"}]},
+        ],
+    }
+    try:
+        feishu_post_card(card)
+        log(f"weekly report sent: {agg['total']} mails in window")
+    except Exception as e:
+        log("weekly report send failed:", e)
+
+    try:
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+        fname = os.path.join(REPORTS_DIR, f"weekly-{now.strftime('%Y-%m-%d')}.md")
+        with open(fname, "w", encoding="utf-8") as fh:
+            fh.write(f"# 本周邮件分析 {date_range}\n\n## 总览\n{overview}\n\n## 询盘话题\n{topics}\n\n## Top 发件人\n")
+            for em, n in top_senders:
+                fh.write(f"- {em} x{n}\n")
+            fh.write(f"\n## 按钮操作\n{actions}\n\n## AI 洞察\n{insights}\n")
+    except Exception as e:
+        log("weekly report archive failed:", e)
+
+
+def weekly_report_loop():
+    """Every Sunday 08:00 Asia/Shanghai: generate and send the weekly report."""
+    if not MAILBOXES:
+        log("weekly report: no mailboxes configured, skip")
+        return
+    while True:
+        try:
+            delay = seconds_until_sunday_8am("Asia/Shanghai")
+            log(f"weekly report: next run in {int(delay)}s (Sunday 08:00 Asia/Shanghai)")
+            time.sleep(delay)
+            generate_weekly_report()
+        except Exception as e:
+            log("weekly report error:", e)
             time.sleep(3600)
 
 
@@ -725,6 +917,7 @@ def _do_add_contact(email, name):
         log(f"add_contact: {email} name={name!r} -> {resp.get('message', resp)}")
         ok = str(resp.get("code", "")) == "0"
         if ok:
+            log_stats({"type": "action", "action": "add_contact", "email": email})
             threading.Thread(target=_refresh_contacts_cache, daemon=True).start()
         text = f"{'✅' if ok else '❌'} 加入 CAM-03：{email}"
         if name:
@@ -759,6 +952,7 @@ def action_add_contact(value):
 def action_view_original(value):
     """Send the cached email body back to the user via Feishu."""
     key = value.get("key", "")
+    log_stats({"type": "action", "action": "view_original", "key": key})
     entry = load_mail_cache().get(key)
     if not entry:
         return {"toast": {"type": "error", "content": "原文不存在或已过期"}}
@@ -841,6 +1035,7 @@ def action_draft_reply(value):
     key = (value.get("key") or "").strip()
     if not key:
         return {"toast": {"type": "error", "content": "缺少邮件标识"}}
+    log_stats({"type": "action", "action": "draft_reply", "key": key})
     threading.Thread(target=_do_draft_reply, args=(key,), daemon=True).start()
     return {"toast": {"type": "info", "content": "正在生成回复草稿…"}}
 
@@ -953,6 +1148,7 @@ def action_save_draft(value):
     key = (value.get("key") or "").strip()
     if not key:
         return {"toast": {"type": "error", "content": "缺少邮件标识"}}
+    log_stats({"type": "action", "action": "save_draft", "key": key})
     threading.Thread(target=_do_save_draft, args=(key,), daemon=True).start()
     return {"toast": {"type": "info", "content": "正在存入草稿箱…"}}
 
@@ -1035,4 +1231,5 @@ if __name__ == "__main__":
     log(f"mail-poller starting: {len(MAILBOXES)} mailbox(es), interval={POLL_INTERVAL}s, port={PORT}")
     threading.Thread(target=loop, daemon=True).start()
     threading.Thread(target=contacts_sync_loop, daemon=True).start()
+    threading.Thread(target=weekly_report_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", PORT), Health).serve_forever()

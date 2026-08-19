@@ -258,3 +258,32 @@ def draft_reply(from_, subject, body, knowledge_text, sample_text, voice_text, r
     except Exception as e:
         return None, f"llm error: {e}"
     return draft, None
+
+
+def weekly_insights(records_text):
+    """Summarize this week's email records into 3-5 business insights (Chinese)."""
+    if not DEEPSEEK_API_KEY:
+        return "（未配置 LLM，跳过洞察）"
+    system = (
+        "You are a business email analyst for a Chinese swimwear manufacturer. "
+        "Given this week's email records (label | sender | subject | summary), produce 3-5 "
+        "concise insights: business trends, customer behavior, recurring questions, and 1-2 "
+        "actionable suggestions. Answer in Chinese. Output each insight as one line starting "
+        "with '- '. Be specific and concrete; no fluff."
+    )
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": records_text[:12000]}],
+        "temperature": 0.4,
+    }
+    url = DEEPSEEK_BASE_URL.rstrip("/") + "/chat/completions"
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={
+        "Authorization": "Bearer " + DEEPSEEK_API_KEY,
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return d["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return f"（洞察生成失败：{e}）"
