@@ -176,13 +176,16 @@ def feishu_send_inquiry_card_v2(folder_label, label, from_, subject, summary, da
                 {"tag": "div", "text": {"tag": "plain_text",
                  "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}"}},
                 {"tag": "hr"},
-                {"tag": "action", "actions": [
-                    {"tag": "button", "text": {"tag": "plain_text", "content": "📄 查看原文"}, "type": "default",
-                     "value": {"action": "view_original", "key": key}},
-                    {"tag": "button", "text": {"tag": "plain_text", "content": "✍️ 自动回复"}, "type": "default",
-                     "value": {"action": "draft_reply", "key": key}},
-                    {"tag": "button", "text": {"tag": "plain_text", "content": "➕ 加入 CAM-03"}, "type": "primary",
-                     "value": {"action": "add_contact", "email": email, "name": name, "from": from_, "subject": subject}},
+                {"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "default", "columns": [
+                    {"tag": "column", "width": "auto", "vertical_align": "top", "elements": [
+                        {"tag": "button", "text": {"tag": "plain_text", "content": "📄 查看原文"}, "type": "default",
+                         "value": {"action": "view_original", "key": key}}]},
+                    {"tag": "column", "width": "auto", "vertical_align": "top", "elements": [
+                        {"tag": "button", "text": {"tag": "plain_text", "content": "✍️ 自动回复"}, "type": "default",
+                         "value": {"action": "draft_reply", "key": key}}]},
+                    {"tag": "column", "width": "auto", "vertical_align": "top", "elements": [
+                        {"tag": "button", "text": {"tag": "plain_text", "content": "➕ 加入 CAM-03"}, "type": "primary",
+                         "value": {"action": "add_contact", "email": email, "name": name, "from": from_, "subject": subject}}]},
                 ]},
                 {"tag": "hr"},
                 {"tag": "form", "name": "guide_form", "elements": [
