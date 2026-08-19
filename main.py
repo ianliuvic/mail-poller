@@ -629,25 +629,49 @@ def register_action(name):
     return decorator
 
 
+def _refresh_contacts_cache():
+    try:
+        payload = zoho_contacts.sync_contacts()
+        log(f"contacts cache refreshed: {payload['count']} contacts")
+    except Exception as e:
+        log("contacts cache refresh failed:", e)
+
+
+def _do_add_contact(email, name):
+    """Run in a background thread: add to CAM-03, then report the result via Feishu."""
+    try:
+        resp = zoho_contacts.subscribe_contact(email, name)
+        log(f"add_contact: {email} name={name!r} -> {resp.get('message', resp)}")
+        ok = str(resp.get("code", "")) == "0"
+        if ok:
+            threading.Thread(target=_refresh_contacts_cache, daemon=True).start()
+        text = f"{'✅' if ok else '❌'} 加入 CAM-03：{email}"
+        if name:
+            text += f"（{name}）"
+        if not ok:
+            text += f"\n原因：{resp.get('message', '未知错误')}"
+        feishu_send(text)
+    except Exception as e:
+        log("add_contact failed:", e)
+        try:
+            feishu_send(f"❌ 加入 CAM-03 失败：{e}")
+        except Exception as e2:
+            log("feishu send failed:", e2)
+
+
 @register_action("add_contact")
 def action_add_contact(value):
-    """Add the stranger's email (and extracted name) to CAM-03."""
+    """Add the stranger's email (and extracted name) to CAM-03 in the background.
+
+    Feishu requires the card callback to respond within 3s, so the actual work
+    runs in a thread and the result is delivered as a follow-up Feishu message.
+    """
     email = (value.get("email") or "").strip().lower()
     name = (value.get("name") or "").strip() or _extract_name(value.get("from", ""))
     if not email or "@" not in email:
         return {"toast": {"type": "error", "content": "缺少有效邮箱"}}
-    try:
-        resp = zoho_contacts.subscribe_contact(email, name)
-        log(f"add_contact: {email} name={name!r} -> {resp.get('message', resp)}")
-        try:
-            payload = zoho_contacts.sync_contacts()
-            log(f"contacts cache refreshed after add_contact: {payload['count']} contacts")
-        except Exception as e:
-            log("contacts cache refresh failed:", e)
-        return {"toast": {"type": "success", "content": f"已加入 CAM-03：{email}"}}
-    except Exception as e:
-        log("add_contact failed:", e)
-        return {"toast": {"type": "error", "content": f"加入失败：{e}"}}
+    threading.Thread(target=_do_add_contact, args=(email, name), daemon=True).start()
+    return {"toast": {"type": "info", "content": "正在加入 CAM-03…"}}
 
 
 @register_action("view_original")

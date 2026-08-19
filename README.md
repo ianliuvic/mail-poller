@@ -40,6 +40,7 @@
 ## 飞书事件回调
 
 - 端点：`POST /feishu/callback`（也兼容 `GET /feishu/callback?challenge=...`）。
+- 飞书要求卡片回调 **3 秒内响应**：耗时的动作（如 `add_contact` 调 Zoho）在后台线程执行，先秒回「正在处理」，结果以一条飞书消息（✅/❌）送达。
 - 用途：接收飞书卡片按钮点击（`card.action.trigger`），`value` 里带 `{action, email, name, from, subject}`。
 - 按钮动作通过 `ACTION_HANDLERS` 注册表分发（`@register_action("xxx")`），便于扩展；当前内置：
   - `view_original`：把缓存的邮件正文（`/data/mail_cache.json`，截断 6000 字）作为消息发到飞书；
