@@ -19,6 +19,7 @@ Config (all via environment variables, no secrets in code):
 """
 
 import base64
+import datetime
 import email
 import json
 import os
@@ -28,8 +29,9 @@ import time
 import urllib.parse
 import urllib.request
 from email.header import decode_header, make_header
+from email.message import EmailMessage
 from email.parser import BytesHeaderParser
-from email.utils import getaddresses, parsedate_to_datetime
+from email.utils import getaddresses, format_datetime, make_msgid, parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import mailai
@@ -92,15 +94,29 @@ def feishu_send(text):
     return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
 
 
-def feishu_send_card(folder_label, label, from_, subject, summary, date, email, name="", show_buttons=False, key=""):
-    """Send an interactive card. 'view original' on every card; 'add to CAM-03'
-    only on explicit stranger inquiries (show_buttons=True)."""
+def feishu_post_card(card):
+    """Send an interactive card (msg_type=interactive) to the configured receive id."""
     if not (FEISHU_APP_ID and FEISHU_APP_SECRET and RECEIVE_ID):
         log("feishu not configured, skip send")
         return None
     token = feishu_token()
     url = ("https://open.feishu.cn/open-apis/im/v1/messages"
            "?receive_id_type=" + urllib.parse.quote(RECEIVE_ID_TYPE))
+    body = json.dumps({
+        "receive_id": RECEIVE_ID,
+        "msg_type": "interactive",
+        "content": json.dumps(card),
+    }).encode()
+    req = urllib.request.Request(url, data=body, headers={
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+    })
+    return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+
+
+def feishu_send_card(folder_label, label, from_, subject, summary, date, email, name="", show_buttons=False, key=""):
+    """Send an interactive card. 'view original' on every card; 'add to CAM-03'
+    only on explicit stranger inquiries (show_buttons=True)."""
     actions = [
         {
             "tag": "button",
@@ -141,16 +157,7 @@ def feishu_send_card(folder_label, label, from_, subject, summary, date, email, 
         },
         "elements": elements,
     }
-    body = json.dumps({
-        "receive_id": RECEIVE_ID,
-        "msg_type": "interactive",
-        "content": json.dumps(card),
-    }).encode()
-    req = urllib.request.Request(url, data=body, headers={
-        "Authorization": "Bearer " + token,
-        "Content-Type": "application/json",
-    })
-    return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+    return feishu_post_card(card)
 
 
 # ---------- state ----------
@@ -794,18 +801,32 @@ def _do_draft_reply(key):
         if err or not draft:
             feishu_send(f"❌ 草稿生成失败：{err or '空结果'}")
             return
-        msg = (
-            f"✍️ 回复草稿（致 {from_}）\n"
-            f"建议主题：Re: {subject}\n"
-            "————————————\n"
-            f"{draft}\n"
-            "————————————\n⚠️ 草稿未发送，请人工核对后自行发送"
-        )
+        # persist the draft so "save to Zoho draft" can reuse the exact reviewed text
         try:
-            feishu_send(msg)
-            log(f"draft sent: {len(draft)} chars, for {from_}")
+            cache = load_mail_cache()
+            if key in cache:
+                cache[key]["draft"] = draft
+                save_mail_cache(cache)
         except Exception as e:
-            log("draft feishu send failed:", e)
+            log("draft cache save failed:", e)
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {"template": "blue", "title": {"tag": "plain_text", "content": "✍️ 回复草稿"}},
+            "elements": [
+                {"tag": "div", "text": {"tag": "plain_text", "content": f"致：{from_}\n建议主题：Re: {subject}\n\n{draft}"}},
+                {"tag": "hr"},
+                {"tag": "action", "actions": [
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "📥 存入 Zoho 草稿"},
+                     "type": "primary", "value": {"action": "save_draft", "key": key}},
+                ]},
+                {"tag": "note", "elements": [{"tag": "plain_text", "content": "⚠️ 未发送；存入草稿后可到 Zoho Mail 草稿箱编辑再发送"}]},
+            ],
+        }
+        try:
+            feishu_post_card(card)
+            log(f"draft card sent: {len(draft)} chars, for {from_}")
+        except Exception as e:
+            log("draft card send failed:", e)
     except Exception as e:
         log("draft_reply failed:", e)
         try:
@@ -822,6 +843,118 @@ def action_draft_reply(value):
         return {"toast": {"type": "error", "content": "缺少邮件标识"}}
     threading.Thread(target=_do_draft_reply, args=(key,), daemon=True).start()
     return {"toast": {"type": "info", "content": "正在生成回复草稿…"}}
+
+
+# ---------- save draft to Zoho (never send) ----------
+
+DRAFTS_FOLDER = "&g0l6P3ux-"  # Zoho CN Drafts (modified UTF-7 of 草稿)
+REPLY_FROM_NAME = "Ian at Hongxiu"
+REPLY_FROM_ADDR = "ian@wearhongxiu.com"
+
+
+def _parse_mail_key(key):
+    if "::" not in key:
+        return None, None
+    folder, _, uid = key.partition("::")
+    return folder, uid
+
+
+def _fetch_original_by_key(folder, uid):
+    """Fetch the original message (RFC822) from folder+uid on the first configured mailbox."""
+    if not MAILBOXES:
+        return None
+    mb = MAILBOXES[0]
+    M = imaplib_connect(mb["host"], int(mb.get("port", 993)), mb["user"], mb["password"])
+    try:
+        try:
+            M.select(folder)
+        except Exception as e:
+            log(f"save_draft: select {folder} failed:", e)
+            return None
+        typ, data = M.uid("fetch", str(uid), "(RFC822)")
+        if not data or not data[0]:
+            return None
+        return email.message_from_bytes(data[0][1])
+    finally:
+        M.logout()
+
+
+def _quote_original(msg):
+    body, _ = mailai.extract_body(msg)
+    body = (body or "").strip()[:12000]
+    if not body:
+        return ""
+    return "> " + body.replace("\n", "\n> ")
+
+
+def _do_save_draft(key):
+    """Background: build the reply email (draft + quoted history) and APPEND to Zoho Drafts."""
+    try:
+        folder, uid = _parse_mail_key(key)
+        if not folder or not uid:
+            feishu_send("❌ 存入草稿失败：无效的邮件标识")
+            return
+        entry = load_mail_cache().get(key)
+        draft = (entry or {}).get("draft", "")
+        if not draft:
+            feishu_send("❌ 找不到草稿内容（请先点「✍️ 自动回复」生成）")
+            return
+        msg = _fetch_original_by_key(folder, uid)
+        if msg is None:
+            feishu_send("❌ 无法读取原始邮件")
+            return
+
+        from_ = decode_mime(msg.get("From"))
+        subject = decode_mime(msg.get("Subject"))
+        msg_id = (msg.get("Message-ID") or "").strip()
+        refs = (msg.get("References") or "").strip()
+        date = msg.get("Date") or ""
+
+        to_value = from_ if from_ else REPLY_FROM_ADDR
+        reply_subject = subject or ""
+        if not re.match(r"^\s*(re|回复)\s*[:：]", reply_subject, re.I):
+            reply_subject = f"Re: {reply_subject}"
+
+        reply = EmailMessage()
+        reply["From"] = f'"{REPLY_FROM_NAME}" <{REPLY_FROM_ADDR}>'
+        reply["To"] = to_value
+        reply["Subject"] = reply_subject
+        if msg_id:
+            reply["In-Reply-To"] = msg_id
+            reply["References"] = (refs + " " + msg_id).strip()
+        reply["Date"] = format_datetime(datetime.datetime.now())
+        reply["Message-ID"] = make_msgid(domain="wearhongxiu.com")
+        reply.set_content(
+            f"{draft}\n\n发件人: {from_}\n到: {REPLY_FROM_ADDR}\n日期: {date}\n主题: {subject}\n\n{_quote_original(msg)}"
+        )
+
+        mb = MAILBOXES[0]
+        M = imaplib_connect(mb["host"], int(mb.get("port", 993)), mb["user"], mb["password"])
+        try:
+            M.append(DRAFTS_FOLDER, r"\Drafts", None, reply.as_bytes())
+            log(f"draft saved to Zoho Drafts: {to_value} | {reply_subject}")
+            feishu_send(
+                f"✅ 已存入 Zoho 草稿箱\n致：{to_value}\n主题：{reply_subject}\n"
+                "（草稿未发送；可在 Zoho Mail 草稿箱编辑后自行发送）"
+            )
+        finally:
+            M.logout()
+    except Exception as e:
+        log("save_draft failed:", e)
+        try:
+            feishu_send(f"❌ 存入草稿失败：{e}")
+        except Exception:
+            pass
+
+
+@register_action("save_draft")
+def action_save_draft(value):
+    """Save the reviewed reply draft into the Zoho Mail Drafts folder (background, no send)."""
+    key = (value.get("key") or "").strip()
+    if not key:
+        return {"toast": {"type": "error", "content": "缺少邮件标识"}}
+    threading.Thread(target=_do_save_draft, args=(key,), daemon=True).start()
+    return {"toast": {"type": "info", "content": "正在存入草稿箱…"}}
 
 
 def handle_feishu_callback(body_bytes):
