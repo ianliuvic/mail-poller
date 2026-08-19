@@ -4,6 +4,18 @@
 从 Wear Hongxiu WordPress 拉取的精选业务知识，用于撰写自动回复。
 来源全部为 WordPress REST（只读），不依赖 RAG。刷新：python scripts/fetch_knowledge.py。
 
+## 声音与规则（自动回复风格）
+
+| 文件 | 说明 |
+|---|---|
+| voice.md | Ian 的声音画像（语气/称呼/落款/句式/数字表达），28 封真实回复提取 |
+| reply-rules.md | 回复必做动作（必问/必给/CTA/禁忌），与 voice.md 配合 |
+| reply-samples/rfq-detailed-reply.md | 范文：RFQ 详细回复 |
+| reply-samples/moq-pricing-reply.md | 范文：MOQ/报价回复 |
+| reply-samples/sample-order-reply.md | 范文：样品订单回复 |
+
+## 业务知识（WordPress 精选）
+
 | 文件 | 标题 | 分类 | wp_id | 类型 | 更新 |
 |---|---|---|---|---|---|
 | 01-oem-swimwear-manufacturing.md | OEM Swimwear Manufacturing | oem-private-label | 8492 | page | 2026-08-10 |
