@@ -163,9 +163,26 @@ def feishu_send_card(folder_label, label, from_, subject, summary, date, email, 
     return feishu_post_card(card)
 
 
-def feishu_send_inquiry_card_v2(folder_label, label, from_, subject, summary, date, email, name, key):
-    """Card JSON 2.0 for stranger inquiries: normal buttons + a multi-line guidance
-    form whose submit triggers a 'guided_reply' (guide text comes back in form_value)."""
+def feishu_send_inquiry_card_v2(folder_label, label, from_, subject, summary, date, email, name, key,
+                                show_draft=False, show_contact=False):
+    """Card JSON 2.0 with a multi-line guidance form (submit triggers 'guided_reply').
+
+    Buttons: 查看原文 always; ✍️ 自动回复 when show_draft; ➕ 加入 CAM-03 when show_contact.
+    Used for stranger inquiries (both) and contact/reply cards (neither extra button).
+    """
+    columns = [
+        {"tag": "column", "width": "auto", "vertical_align": "top", "elements": [
+            {"tag": "button", "text": {"tag": "plain_text", "content": "📄 查看原文"}, "type": "default",
+             "value": {"action": "view_original", "key": key}}]},
+    ]
+    if show_draft:
+        columns.append({"tag": "column", "width": "auto", "vertical_align": "top", "elements": [
+            {"tag": "button", "text": {"tag": "plain_text", "content": "✍️ 自动回复"}, "type": "default",
+             "value": {"action": "draft_reply", "key": key}}]})
+    if show_contact:
+        columns.append({"tag": "column", "width": "auto", "vertical_align": "top", "elements": [
+            {"tag": "button", "text": {"tag": "plain_text", "content": "➕ 加入 CAM-03"}, "type": "primary",
+             "value": {"action": "add_contact", "email": email, "name": name, "from": from_, "subject": subject}}]})
     card = {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
@@ -176,17 +193,7 @@ def feishu_send_inquiry_card_v2(folder_label, label, from_, subject, summary, da
                 {"tag": "div", "text": {"tag": "plain_text",
                  "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}"}},
                 {"tag": "hr"},
-                {"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "default", "columns": [
-                    {"tag": "column", "width": "auto", "vertical_align": "top", "elements": [
-                        {"tag": "button", "text": {"tag": "plain_text", "content": "📄 查看原文"}, "type": "default",
-                         "value": {"action": "view_original", "key": key}}]},
-                    {"tag": "column", "width": "auto", "vertical_align": "top", "elements": [
-                        {"tag": "button", "text": {"tag": "plain_text", "content": "✍️ 自动回复"}, "type": "default",
-                         "value": {"action": "draft_reply", "key": key}}]},
-                    {"tag": "column", "width": "auto", "vertical_align": "top", "elements": [
-                        {"tag": "button", "text": {"tag": "plain_text", "content": "➕ 加入 CAM-03"}, "type": "primary",
-                         "value": {"action": "add_contact", "email": email, "name": name, "from": from_, "subject": subject}}]},
-                ]},
+                {"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "default", "columns": columns},
                 {"tag": "hr"},
                 {"tag": "form", "name": "guide_form", "elements": [
                     {"tag": "input", "name": "guide_input", "input_type": "multiline_text", "rows": 3,
@@ -641,6 +648,10 @@ def poll_once():
                     log("mail cache write failed:", e)
                 try:
                     if r["buttons"]:
+                        # stranger inquiry: full button set + guidance form
+                        feishu_send_inquiry_card_v2(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], key, show_draft=True, show_contact=True)
+                    elif r["label"] in ("客户", "回复"):
+                        # contact / reply cards: 查看原文 + guidance form (guided auto-reply)
                         feishu_send_inquiry_card_v2(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], key)
                     else:
                         feishu_send_card(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], r["buttons"], key)
