@@ -9,3 +9,6 @@ recent_mails.json
 contacts_import.csv
 classify_inquiries.py
 import_contacts.py
+
+# Runtime business knowledge lives in Coolify persistent storage (/data/knowledge)
+knowledge/

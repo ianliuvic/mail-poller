@@ -878,7 +878,7 @@ def weekly_report_loop():
 
 # ---------- knowledge pack (reply-draft context) ----------
 
-KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge")
+KNOWLEDGE_DIR = os.environ.get("KNOWLEDGE_DIR", "/data/knowledge")
 
 CATEGORY_KEYWORDS = {
     "pricing-moq": ["moq", "price", "pricing", "quote", "cost", "budget", "报价", "价格", "起订量"],
@@ -905,6 +905,19 @@ def load_voice_and_rules():
         _read_file(os.path.join(KNOWLEDGE_DIR, "voice.md")),
         _read_file(os.path.join(KNOWLEDGE_DIR, "reply-rules.md")),
     )
+
+
+def validate_knowledge_dir():
+    required = ("voice.md", "reply-rules.md")
+    missing = [name for name in required if not os.path.isfile(os.path.join(KNOWLEDGE_DIR, name))]
+    if missing:
+        raise RuntimeError(
+            f"knowledge directory is incomplete: {KNOWLEDGE_DIR} (missing: {', '.join(missing)})"
+        )
+    count = sum(
+        1 for _root, _dirs, files in os.walk(KNOWLEDGE_DIR) for name in files if name.endswith(".md")
+    )
+    log(f"knowledge ready: {count} markdown files -> {KNOWLEDGE_DIR}")
 
 
 def select_knowledge_categories(text):
@@ -1325,6 +1338,7 @@ class Health(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     log(f"mail-poller starting: {len(MAILBOXES)} mailbox(es), interval={POLL_INTERVAL}s, port={PORT}")
+    validate_knowledge_dir()
     threading.Thread(target=loop, daemon=True).start()
     threading.Thread(target=contacts_sync_loop, daemon=True).start()
     threading.Thread(target=weekly_report_loop, daemon=True).start()

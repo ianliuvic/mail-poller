@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fetch curated Wear Hongxiu WordPress pages/posts into knowledge/ as Markdown.
+"""Fetch curated Wear Hongxiu WordPress pages/posts into persistent knowledge storage.
 
-The knowledge/ pack is the business context the mail-poller will use for writing
+The knowledge pack is the business context the mail-poller will use for writing
 automatic replies. Refresh after WP content changes:
 
     python scripts/fetch_knowledge.py
@@ -24,7 +24,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root
-OUT_DIR = os.path.join(BASE_DIR, "knowledge")
+OUT_DIR = os.environ.get("KNOWLEDGE_DIR", "/data/knowledge")
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
