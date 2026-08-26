@@ -117,7 +117,25 @@ def feishu_post_card(card):
     return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
 
 
-def feishu_send_card(folder_label, label, from_, subject, summary, date, email, name="", show_buttons=False, key=""):
+def _format_attachment_info(attachments):
+    if not attachments:
+        return ""
+    lines = [f"附件：{len(attachments)} 个"]
+    for item in attachments[:10]:
+        size = int(item.get("size") or 0)
+        if size >= 1024 * 1024:
+            size_text = f"{size / (1024 * 1024):.1f} MB"
+        elif size >= 1024:
+            size_text = f"{size / 1024:.1f} KB"
+        else:
+            size_text = f"{size} B"
+        lines.append(f"- {item.get('filename') or '（未命名）'} · {item.get('content_type') or '未知类型'} · {size_text}")
+    if len(attachments) > 10:
+        lines.append(f"- 其余 {len(attachments) - 10} 个附件未展开")
+    return "\n" + "\n".join(lines)
+
+
+def feishu_send_card(folder_label, label, from_, subject, summary, date, email, name="", show_buttons=False, key="", attachments=None):
     """Send an interactive card. 'view original' on every card; 'add to CAM-03'
     only on explicit stranger inquiries (show_buttons=True)."""
     actions = [
@@ -146,7 +164,7 @@ def feishu_send_card(folder_label, label, from_, subject, summary, date, email, 
             "tag": "div",
             "text": {
                 "tag": "plain_text",
-                "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}",
+                "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}{_format_attachment_info(attachments or [])}",
             },
         },
         {"tag": "hr"},
@@ -164,7 +182,7 @@ def feishu_send_card(folder_label, label, from_, subject, summary, date, email, 
 
 
 def feishu_send_inquiry_card_v2(folder_label, label, from_, subject, summary, date, email, name, key,
-                                show_draft=False, show_contact=False):
+                                show_draft=False, show_contact=False, attachments=None):
     """Card JSON 2.0 with a multi-line guidance form (submit triggers 'guided_reply').
 
     Buttons: 查看原文 always; ✍️ 自动回复 when show_draft; ➕ 加入 CAM-03 when show_contact.
@@ -191,7 +209,7 @@ def feishu_send_inquiry_card_v2(folder_label, label, from_, subject, summary, da
             "direction": "vertical",
             "elements": [
                 {"tag": "div", "text": {"tag": "plain_text",
-                 "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}"}},
+                 "content": f"发件人：{from_}\n主题：{subject}\n时间：{date}\n摘要：{summary}{_format_attachment_info(attachments or [])}"}},
                 {"tag": "hr"},
                 {"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "default", "columns": columns},
                 {"tag": "hr"},
@@ -250,7 +268,7 @@ def save_mail_cache(cache):
     os.replace(tmp, MAIL_CACHE_FILE)
 
 
-def cache_mail(key, from_, subject, date, folder, body, max_entries=100):
+def cache_mail(key, from_, subject, date, folder, body, attachments=None, max_entries=100):
     """Cache an email's body so the 'view original' button can retrieve it later."""
     cache = load_mail_cache()
     cache[key] = {
@@ -259,6 +277,7 @@ def cache_mail(key, from_, subject, date, folder, body, max_entries=100):
         "date": date,
         "folder": folder,
         "body": (body or "")[:6000],
+        "attachments": attachments or [],
     }
     if len(cache) > max_entries:
         for k in list(cache)[:len(cache) - max_entries]:
@@ -355,6 +374,7 @@ def poll_mailbox(mb):
             from_ = decode_mime(msg.get("From"))
             subject = decode_mime(msg.get("Subject"))
             body, _ = mailai.extract_body(msg)
+            attachments = mailai.extract_attachments(msg)
             date_str = ""
             try:
                 date_str = parsedate_to_datetime(msg.get("Date")).strftime("%Y-%m-%d %H:%M")
@@ -366,6 +386,7 @@ def poll_mailbox(mb):
                 "from": from_,
                 "subject": subject,
                 "body": body,
+                "attachments": attachments,
                 "date": date_str,
                 "in_reply_to": msg.get("In-Reply-To") or "",
                 "references": msg.get("References") or "",
@@ -643,18 +664,18 @@ def poll_once():
                 log(f"notify card: [{r['label']}] {from_} | {subject}")
                 key = f"{item.get('folder', '')}::{item.get('uid', '')}"
                 try:
-                    cache_mail(key, from_, subject, item.get("date", ""), folder_label, item.get("body", ""))
+                    cache_mail(key, from_, subject, item.get("date", ""), folder_label, item.get("body", ""), item.get("attachments", []))
                 except Exception as e:
                     log("mail cache write failed:", e)
                 try:
                     if r["buttons"]:
                         # stranger inquiry: full button set + guidance form
-                        feishu_send_inquiry_card_v2(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], key, show_draft=True, show_contact=True)
+                        feishu_send_inquiry_card_v2(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], key, show_draft=True, show_contact=True, attachments=item.get("attachments", []))
                     elif r["label"] in ("客户", "回复"):
                         # contact / reply cards: 查看原文 + guidance form (guided auto-reply)
-                        feishu_send_inquiry_card_v2(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], key)
+                        feishu_send_inquiry_card_v2(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], key, attachments=item.get("attachments", []))
                     else:
-                        feishu_send_card(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], r["buttons"], key)
+                        feishu_send_card(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], r["buttons"], key, item.get("attachments", []))
                 except Exception as e:
                     log("feishu send failed:", e)
         except Exception as e:
@@ -1031,6 +1052,7 @@ def action_view_original(value):
         f"主题：{entry.get('subject', '')}\n"
         f"时间：{entry.get('date', '')}\n"
         f"文件夹：{entry.get('folder', '')}\n"
+        + _format_attachment_info(entry.get("attachments", []))
         + ("（正文过长，已截断）\n" if truncated else "")
         + "————————————\n"
         + (body if body else "（无正文）")

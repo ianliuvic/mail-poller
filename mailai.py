@@ -109,6 +109,27 @@ def extract_body(msg):
     return "", False
 
 
+def extract_attachments(msg):
+    """Return attachment metadata without retaining or sending attachment content."""
+    attachments = []
+    if not msg.is_multipart():
+        return attachments
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        disposition = str(part.get("Content-Disposition") or "").lower()
+        filename = decode_mime(part.get_filename() or "")
+        if "attachment" not in disposition and not filename:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        attachments.append({
+            "filename": filename or "（未命名）",
+            "content_type": part.get_content_type() or "application/octet-stream",
+            "size": len(payload),
+        })
+    return attachments
+
+
 # ---------- regex quote stripping (first layer) ----------
 
 _SEPARATORS = [
