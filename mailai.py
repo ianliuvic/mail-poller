@@ -20,6 +20,26 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 DEEPSEEK_REPLY_MODEL = os.environ.get("DEEPSEEK_REPLY_MODEL", "deepseek-v4-pro")
 MAX_BODY_CHARS = 3000
 
+SIGNATURE = """Best regards,
+Ian
+Operations Manager at Hongxiu Clothing Co., Ltd.
+
+T (+86) 177-1101-4152
+W www.wearhongxiu.com
+L www.linkedin.com/in/yin-liu-hongxiu/
+
+Your trusted swimwear manufacturing partner in China."""
+
+
+def normalize_signature(text):
+    """Replace the model's closing block with the canonical company signature."""
+    text = (text or "").strip()
+    marker = re.search(r"(?im)^\s*Best regards,\s*$", text)
+    if marker:
+        text = text[:marker.start()].rstrip()
+        return (text + "\n\n" if text else "") + SIGNATURE
+    return text + "\n\n" + SIGNATURE if text else SIGNATURE
+
 
 # ---------- header decode ----------
 
@@ -284,7 +304,7 @@ def draft_reply(from_, subject, body, knowledge_text, sample_text, voice_text, r
     try:
         with urllib.request.urlopen(req, timeout=180) as r:
             d = json.loads(r.read().decode("utf-8"))
-        draft = d["choices"][0]["message"]["content"].strip()
+        draft = normalize_signature(d["choices"][0]["message"]["content"])
     except Exception as e:
         return None, f"llm error: {e}"
     return draft, None

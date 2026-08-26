@@ -21,6 +21,7 @@ Config (all via environment variables, no secrets in code):
 import base64
 import datetime
 import email
+import html
 import json
 import os
 import re
@@ -1153,6 +1154,18 @@ REPLY_FROM_ADDR = "ian@wearhongxiu.com"
 ZOHO_MAIL_ACCOUNT_ID = os.environ.get("ZOHO_MAIL_ACCOUNT_ID", "1486660000000002002")
 
 
+def _draft_content_html(content):
+    """Convert the plain draft to safe HTML and color only T/W/L signature lines."""
+    lines = (content or "").splitlines()
+    rendered = []
+    for line in lines:
+        escaped = html.escape(line)
+        if line.startswith(("T (+86)", "W www.", "L www.")):
+            escaped = f'<strong style="color:#a02025">{escaped}</strong>'
+        rendered.append(escaped)
+    return "<br>".join(rendered)
+
+
 def _zoho_mail_save_draft(from_addr, to_addr, subject, content, in_reply_to="", ref_header=""):
     """Save a reply draft via the Zoho Mail official API (mode=draft, NEVER sends).
 
@@ -1167,8 +1180,8 @@ def _zoho_mail_save_draft(from_addr, to_addr, subject, content, in_reply_to="", 
         "fromAddress": from_addr,
         "toAddress": to_addr,
         "subject": subject,
-        "content": content,
-        "mailFormat": "plaintext",
+        "content": _draft_content_html(content),
+        "mailFormat": "html",
     }
     if in_reply_to:
         payload["inReplyTo"] = in_reply_to
