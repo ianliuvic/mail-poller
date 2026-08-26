@@ -1161,8 +1161,12 @@ def _draft_content_html(content):
     for line in lines:
         escaped = html.escape(line)
         if line.startswith(("T (+86)", "W www.", "L www.")):
-            escaped = f'<strong style="color:#a02025">{escaped}</strong>'
+            escaped = f'<strong style="color:#a02025">{html.escape(line[0])}</strong>{html.escape(line[1:])}'
+        elif line == "Your trusted swimwear manufacturing partner in China.":
+            escaped = '<small><em style="color:#808080">Your trusted swimwear manufacturing partner in China.</em></small>'
         rendered.append(escaped)
+        if line == "Your trusted swimwear manufacturing partner in China.":
+            rendered.append("<hr>")
     return "<br>".join(rendered)
 
 

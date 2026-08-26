@@ -37,8 +37,8 @@ def normalize_signature(text):
     marker = re.search(r"(?im)^\s*Best regards,\s*$", text)
     if marker:
         text = text[:marker.start()].rstrip()
-        return (text + "\n\n" if text else "") + SIGNATURE
-    return text + "\n\n" + SIGNATURE if text else SIGNATURE
+        return (text + "\n\n\n" if text else "") + SIGNATURE
+    return text + "\n\n\n" + SIGNATURE if text else SIGNATURE
 
 
 # ---------- header decode ----------
