@@ -584,6 +584,11 @@ def process_mail(item, contacts_emails, sent_mids, sent_recipients):
     )
     reply_to_me = is_reply and (refs_my_mid or (from_addr and from_addr in sent_recipients))
 
+    # Empty stranger messages have no actionable customer intent. Known contacts and
+    # genuine replies remain eligible because short/empty replies can still matter.
+    if not clean and not is_contact and not reply_to_me:
+        return {"should": False, "label": "意义不明", "summary": "邮件正文为空", "name": _extract_name(from_), "buttons": False}
+
     verdict, summary, name, err = mailai.classify_useful(
         from_, subject, clean,
         is_contact=is_contact,
@@ -601,7 +606,7 @@ def process_mail(item, contacts_emails, sent_mids, sent_recipients):
         return {"should": False, "label": "无关", "summary": summary, "name": name, "buttons": False}
     if verdict == "useful":
         return {"should": True, "label": "泳装相关", "summary": summary, "name": name, "buttons": True}
-    return {"should": True, "label": "中性", "summary": summary, "name": name, "buttons": False}
+    return {"should": False, "label": "意义不明", "summary": summary, "name": name, "buttons": False}
 
 
 FOLDER_DISPLAY = {
