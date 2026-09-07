@@ -13,6 +13,9 @@ Config (all via environment variables, no secrets in code):
   FEISHU_RECEIVE_ID        target chat_id / open_id
   FEISHU_RECEIVE_ID_TYPE   chat_id | open_id | user_id | email (default chat_id)
   POLL_INTERVAL_SECONDS    default 300
+  IMAP_TIMEOUT_SECONDS     socket timeout for IMAP operations, default 60
+  POLL_STALE_SECONDS       restart if the poller makes no progress, default 900
+  POLL_WATCHDOG_INTERVAL_SECONDS  watchdog check interval, default 30
   STATE_FILE               default /data/last_uid.json
   SENT_SET_FILE            default /data/sent_set.json (outgoing Message-IDs + recipients)
   PORT                     health HTTP port, default 8000
@@ -46,6 +49,9 @@ RECEIVE_ID_TYPE = os.environ.get("FEISHU_RECEIVE_ID_TYPE", "chat_id")
 MAILBOXES = json.loads(os.environ.get("MAILBOXES_JSON", "[]"))
 CONTACTS = json.loads(os.environ.get("CONTACTS_JSON", "[]"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
+IMAP_TIMEOUT = int(os.environ.get("IMAP_TIMEOUT_SECONDS", "60"))
+POLL_STALE_SECONDS = int(os.environ.get("POLL_STALE_SECONDS", "900"))
+POLL_WATCHDOG_INTERVAL = int(os.environ.get("POLL_WATCHDOG_INTERVAL_SECONDS", "30"))
 START_FROM_UID = int(os.environ.get("START_FROM_UID", "0"))
 STATE_FILE = os.environ.get("STATE_FILE", "/data/last_uid.json")
 SENT_SET_FILE = os.environ.get("SENT_SET_FILE", "/data/sent_set.json")
@@ -58,10 +64,55 @@ CONTACTS_SYNC_TZ = os.environ.get("CONTACTS_SYNC_TZ", "Asia/Shanghai")
 
 _lock = threading.Lock()
 _token = {"value": "", "expires_at": 0}
+_poll_health_lock = threading.Lock()
+_poll_health = {
+    "started_at": time.time(),
+    "last_progress_at": time.time(),
+    "last_cycle_started_at": None,
+    "last_cycle_completed_at": None,
+    "last_error": "",
+    "stage": "starting",
+}
 
 
 def log(*a):
     print(time.strftime("%Y-%m-%d %H:%M:%S"), *a, flush=True)
+
+
+def poll_progress(stage, error=None):
+    """Record non-sensitive liveness details for health checks and the watchdog."""
+    now = time.time()
+    with _poll_health_lock:
+        _poll_health["last_progress_at"] = now
+        _poll_health["stage"] = stage
+        if stage == "cycle-start":
+            _poll_health["last_cycle_started_at"] = now
+        elif stage == "cycle-complete":
+            _poll_health["last_cycle_completed_at"] = now
+            _poll_health["last_error"] = ""
+        if error is not None:
+            _poll_health["last_error"] = str(error)[:500]
+
+
+def poll_health_snapshot(now=None):
+    now = time.time() if now is None else now
+    with _poll_health_lock:
+        state = dict(_poll_health)
+    age = max(0.0, now - state["last_progress_at"])
+    stale = bool(MAILBOXES) and age > POLL_STALE_SECONDS
+    return {
+        "status": "stale" if stale else "ok",
+        "poll_configured": bool(MAILBOXES),
+        "stage": state["stage"],
+        "last_progress_age_seconds": round(age, 1),
+        "last_cycle_started_at": state["last_cycle_started_at"],
+        "last_cycle_completed_at": state["last_cycle_completed_at"],
+        "last_error": state["last_error"],
+    }
+
+
+def poll_is_stale(now=None):
+    return poll_health_snapshot(now)["status"] == "stale"
 
 
 # ---------- Feishu ----------
@@ -342,60 +393,68 @@ def poll_mailbox(mb):
         state.setdefault(f"{name}::INBOX", state.pop(name))
         migrated = True
 
+    poll_progress(f"inbox-connect:{name}")
     M = imaplib_connect(host, port, user, pwd)
     found = []
     updated = False
-    for folder in folders:
-        try:
-            M.select(folder)
-        except Exception as e:
-            log(f"select failed [{name}/{folder}]:", e)
-            continue
-        key = f"{name}::{folder}"
-        if key in state:
-            last_uid = int(state[key])
-        else:
-            # First time this folder is seen: start from its current highest UID,
-            # so existing mail is NOT re-processed. To backfill later, delete this
-            # folder's key from the state file and redeploy/restart.
-            typ0, data0 = M.uid("search", None, "ALL")
-            existing = [int(x) for x in data0[0].split()] if data0 and data0[0] else []
-            last_uid = max(existing) if existing else 0
-            state[key] = last_uid
-            updated = True
-        typ, data = M.uid("search", None, f"UID {last_uid + 1}:*")
-        uids = [int(x) for x in data[0].split()] if data and data[0] else []
-
-        for uid in uids:
-            typ2, msgdata = M.uid("fetch", str(uid), "(RFC822)")
-            if not msgdata or not msgdata[0]:
-                continue
-            raw = msgdata[0][1]
-            msg = email.message_from_bytes(raw)
-            from_ = decode_mime(msg.get("From"))
-            subject = decode_mime(msg.get("Subject"))
-            body, _ = mailai.extract_body(msg)
-            attachments = mailai.extract_attachments(msg)
-            date_str = ""
+    try:
+        for folder in folders:
+            poll_progress(f"inbox-select:{name}:{folder}")
             try:
-                date_str = parsedate_to_datetime(msg.get("Date")).strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                pass
-            found.append({
-                "uid": uid,
-                "folder": folder,
-                "from": from_,
-                "subject": subject,
-                "body": body,
-                "attachments": attachments,
-                "date": date_str,
-                "in_reply_to": msg.get("In-Reply-To") or "",
-                "references": msg.get("References") or "",
-            })
-        if uids:
-            state[key] = max(uids)
-            updated = True
-    M.logout()
+                M.select(folder)
+            except Exception as e:
+                log(f"select failed [{name}/{folder}]:", e)
+                continue
+            key = f"{name}::{folder}"
+            if key in state:
+                last_uid = int(state[key])
+            else:
+                # First time this folder is seen: start from its current highest UID,
+                # so existing mail is NOT re-processed. To backfill later, delete this
+                # folder's key from the state file and redeploy/restart.
+                typ0, data0 = M.uid("search", None, "ALL")
+                existing = [int(x) for x in data0[0].split()] if data0 and data0[0] else []
+                last_uid = max(existing) if existing else 0
+                state[key] = last_uid
+                updated = True
+            typ, data = M.uid("search", None, f"UID {last_uid + 1}:*")
+            uids = [int(x) for x in data[0].split()] if data and data[0] else []
+
+            for uid in uids:
+                poll_progress(f"inbox-fetch:{name}:{folder}:{uid}")
+                typ2, msgdata = M.uid("fetch", str(uid), "(RFC822)")
+                if not msgdata or not msgdata[0]:
+                    continue
+                raw = msgdata[0][1]
+                msg = email.message_from_bytes(raw)
+                from_ = decode_mime(msg.get("From"))
+                subject = decode_mime(msg.get("Subject"))
+                body, _ = mailai.extract_body(msg)
+                attachments = mailai.extract_attachments(msg)
+                date_str = ""
+                try:
+                    date_str = parsedate_to_datetime(msg.get("Date")).strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+                found.append({
+                    "uid": uid,
+                    "folder": folder,
+                    "from": from_,
+                    "subject": subject,
+                    "body": body,
+                    "attachments": attachments,
+                    "date": date_str,
+                    "in_reply_to": msg.get("In-Reply-To") or "",
+                    "references": msg.get("References") or "",
+                })
+            if uids:
+                state[key] = max(uids)
+                updated = True
+    finally:
+        try:
+            M.logout()
+        except Exception as e:
+            log(f"logout failed [{name}]:", e)
 
     if updated or migrated:
         save_state(state)
@@ -404,7 +463,9 @@ def poll_mailbox(mb):
 
 def imaplib_connect(host, port, user, pwd):
     import imaplib
-    M = imaplib.IMAP4_SSL(host, port)
+    M = imaplib.IMAP4_SSL(host, port, timeout=IMAP_TIMEOUT)
+    if getattr(M, "sock", None) is not None:
+        M.sock.settimeout(IMAP_TIMEOUT)
     M.login(user, pwd)
     return M
 
@@ -489,6 +550,7 @@ def collect_sent(mb):
         added = 0
         header_parser = BytesHeaderParser()
         for uid in uids:
+            poll_progress(f"sent-fetch:{name}:{uid}")
             # only need Message-ID + To/Cc headers, so fetch headers (not full body/attachments)
             typ2, msgdata = M.uid("fetch", str(uid), "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID TO CC)])")
             if not msgdata or not msgdata[0]:
@@ -639,21 +701,27 @@ def format_notify_text(folder_label, label, from_, subject, summary, date):
 
 def poll_once():
     if not MAILBOXES:
+        poll_progress("not-configured")
         return
+    poll_progress("cycle-start")
     contacts_emails = load_contacts_emails()
     sent, _ = load_sent_set()
     sent_mids = sent["message_ids"]
     sent_recipients = sent["recipient_emails"]
     for mb in MAILBOXES:
         name = mb.get("name", mb.get("user", "?"))
+        poll_progress(f"mailbox-start:{name}")
         try:
+            poll_progress(f"sent-connect:{name}")
             stats = collect_sent(mb)
             if stats:
                 log(f"sent sync [{name}]: +{stats['added']} new | {stats['message_ids']} msg-ids | {stats['recipients']} recipients | last_uid={stats['last_uid']}")
         except Exception as e:
             log(f"sent collect failed [{name}]:", e)
+            poll_progress(f"sent-error:{name}", e)
         try:
             for item in poll_mailbox(mb):
+                poll_progress(f"mail-process:{name}:{item.get('uid', '')}")
                 from_ = item["from"]
                 subject = item["subject"]
                 folder_label = _folder_display(item.get("folder", ""))
@@ -684,8 +752,11 @@ def poll_once():
                         feishu_send_card(folder_label, r["label"], from_, subject, r["summary"], item.get("date", ""), email, r["name"], r["buttons"], key, item.get("attachments", []))
                 except Exception as e:
                     log("feishu send failed:", e)
+                poll_progress(f"mail-complete:{name}:{item.get('uid', '')}")
         except Exception as e:
             log(f"poll failed [{name}]:", e)
+            poll_progress(f"inbox-error:{name}", e)
+    poll_progress("cycle-complete")
 
 
 def loop():
@@ -695,6 +766,21 @@ def loop():
         except Exception as e:
             log("loop error:", e)
         time.sleep(POLL_INTERVAL)
+
+
+def poll_watchdog_loop():
+    """Force a process restart if the daemon poller stops making progress."""
+    while True:
+        time.sleep(POLL_WATCHDOG_INTERVAL)
+        if poll_is_stale():
+            snapshot = poll_health_snapshot()
+            log(
+                "poll watchdog: stale poller; exiting for container restart",
+                f"stage={snapshot['stage']}",
+                f"age={snapshot['last_progress_age_seconds']}s",
+                f"last_error={snapshot['last_error']}",
+            )
+            os._exit(1)
 
 
 def contacts_sync_loop():
@@ -1356,9 +1442,18 @@ class Health(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
-        self.send_response(200)
+        if urllib.parse.urlparse(self.path).path.rstrip("/") in ("", "/health"):
+            snapshot = poll_health_snapshot()
+            data = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
+            self.send_response(503 if snapshot["status"] == "stale" else 200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_response(404)
         self.end_headers()
-        self.wfile.write(b"ok")
+        self.wfile.write(b"not found")
 
     def do_POST(self):
         if self.path.rstrip("/") == "/feishu/callback":
@@ -1381,9 +1476,13 @@ class Health(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    log(f"mail-poller starting: {len(MAILBOXES)} mailbox(es), interval={POLL_INTERVAL}s, port={PORT}")
+    log(
+        f"mail-poller starting: {len(MAILBOXES)} mailbox(es), interval={POLL_INTERVAL}s, "
+        f"imap_timeout={IMAP_TIMEOUT}s, stale_after={POLL_STALE_SECONDS}s, port={PORT}"
+    )
     validate_knowledge_dir()
     threading.Thread(target=loop, daemon=True).start()
+    threading.Thread(target=poll_watchdog_loop, daemon=True).start()
     threading.Thread(target=contacts_sync_loop, daemon=True).start()
     threading.Thread(target=weekly_report_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", PORT), Health).serve_forever()
