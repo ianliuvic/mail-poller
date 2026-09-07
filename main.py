@@ -40,6 +40,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 import mailai
+import hongxiu_rag
 import zoho_contacts
 
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
@@ -1033,6 +1034,12 @@ def validate_knowledge_dir():
     log(f"knowledge ready: {count} markdown files -> {KNOWLEDGE_DIR}")
 
 
+def validate_rag_config():
+    if not hongxiu_rag.is_configured():
+        raise RuntimeError("Hongxiu RAG is not configured (HONGXIU_RAG_TOKEN is missing)")
+    log(f"hongxiu rag ready: {hongxiu_rag.RAG_URL}")
+
+
 def select_knowledge_categories(text):
     text = (text or "").lower()
     matched = [cat for cat, kws in CATEGORY_KEYWORDS.items() if any(k in text for k in kws)]
@@ -1169,9 +1176,15 @@ def _do_draft_reply(key, guide=""):
         body = entry.get("body", "")
         text = f"{subject}\n{body}"
         categories = select_knowledge_categories(text)
-        knowledge = load_knowledge_for(text)
         voice, rules = load_voice_and_rules()
         sample = load_sample_reply(categories)
+        try:
+            knowledge, sources = hongxiu_rag.search_business_knowledge(subject, body, guide)
+            log(f"hongxiu rag reply context: {len(knowledge)} chars, {len(sources)} source(s)")
+        except Exception as e:
+            log("hongxiu rag reply lookup failed:", e)
+            feishu_send(f"❌ Hongxiu RAG 检索失败，未生成草稿：{str(e)[:180]}")
+            return
         draft, err = mailai.draft_reply(from_, subject, body, knowledge, sample, voice, rules, guide)
         if err or not draft:
             feishu_send(f"❌ 草稿生成失败：{err or '空结果'}")
@@ -1481,6 +1494,7 @@ if __name__ == "__main__":
         f"imap_timeout={IMAP_TIMEOUT}s, stale_after={POLL_STALE_SECONDS}s, port={PORT}"
     )
     validate_knowledge_dir()
+    validate_rag_config()
     threading.Thread(target=loop, daemon=True).start()
     threading.Thread(target=poll_watchdog_loop, daemon=True).start()
     threading.Thread(target=contacts_sync_loop, daemon=True).start()

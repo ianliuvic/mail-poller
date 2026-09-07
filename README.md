@@ -21,6 +21,10 @@
 | `CONTACTS_CACHE_FILE` | 联系人缓存文件，默认 `/data/contacts.json` |
 | `CONTACTS_SYNC_TZ` | 每日同步的时区，默认 `Asia/Shanghai` |
 | `KNOWLEDGE_DIR` | 自动回复知识库目录，默认 `/data/knowledge`；生产环境使用 Coolify 持久化存储 |
+| `HONGXIU_RAG_URL` | Hongxiu RAG MCP 地址，默认 `https://rag-mcp.yiswim.cloud/mcp` |
+| `HONGXIU_RAG_TOKEN` | Hongxiu RAG MCP bearer token（必填） |
+| `HONGXIU_RAG_TOP_K` | 自动回复检索的来源数量，默认 8 |
+| `HONGXIU_RAG_TIMEOUT_SECONDS` | RAG 查询超时，默认 90 秒 |
 
 ## 说明
 
@@ -39,9 +43,9 @@
 
 ## 知识库（自动回复上下文）
 
-- 自动回复知识库存放在 Coolify 持久化存储 `/data/knowledge/`，不随 Git 仓库或应用镜像发布。
-- 刷新：在挂载该存储的运行环境执行 `python scripts/fetch_knowledge.py`（只读 WP REST；凭据用 `WORDPRESS_BASE_URL`/`WORDPRESS_USERNAME`/`WORDPRESS_APPLICATION_PASSWORD` 环境变量，或 `WORDPRESS_ENV_FILE` 指向 .env）。
-- 可通过 `KNOWLEDGE_DIR` 覆盖目录；生产环境保持 `/data/knowledge`。
+- MOQ、价格、面料、打样、交期、物流和付款等业务事实，在点击自动回复时实时查询 Coolify 上的 Hongxiu RAG。
+- Coolify 持久化存储 `/data/knowledge/` 只保留 `voice.md`、`reply-rules.md` 和 `reply-samples/`，用于语气、硬规则与结构参考。
+- RAG 查询失败或没有可靠答案时停止生成草稿并通知飞书，不允许模型自行补全业务事实。
 
 ## 处理流程（每封新邮件）
 
@@ -58,7 +62,7 @@
 - 按钮动作通过 `ACTION_HANDLERS` 注册表分发（`@register_action("xxx")`），便于扩展；当前内置：
   - `view_original`：把缓存的邮件正文（`/data/mail_cache.json`，截断 6000 字）作为消息发到飞书；
   - `add_contact`：把邮箱 + LLM 提取的姓名加入 CAM-03，并刷新本地联系人缓存；
-  - `draft_reply`：陌生询盘卡片上的「✍️ 自动回复」——后台用持久化知识库中的 `voice.md`（声音）+ `reply-rules.md`（规则）+ 业务知识生成回复草稿推给你审核，**不自动发送**；
+  - `draft_reply`：陌生询盘卡片上的「✍️ 自动回复」——后台用 Hongxiu RAG 业务事实 + 持久化目录中的 `voice.md`（声音）、`reply-rules.md`（规则）和回复样例生成草稿推给你审核，**不自动发送**；
   - `guided_reply`：询盘卡片底部「指导意见」多行输入框（卡片 JSON 2.0 textarea）——你输入观点后点「生成指导型回复」，LLM 结合你的指导意见生成草稿推给你，同样不发送；
   - `save_draft`：草稿卡片上的「📥 存入 Zoho 草稿」——通过 **Zoho Mail 官方「保存草稿」API**（`mode=draft` + `inReplyTo`/`refHeader`）存为**原邮件的回复草稿**（Zoho 保证串线），不发送。
 - 在飞书开放平台给应用配置「事件订阅」时，把请求地址填为 `https://<域名>/feishu/callback`，并填写 `FEISHU_VERIFICATION_TOKEN` 环境变量。
