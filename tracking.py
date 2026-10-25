@@ -321,6 +321,22 @@ def snapshot(limit: int = 500) -> dict:
         return {"summary": summary, "rows": result, "generated_at": _now()}
 
 
+def purge(target: str) -> int:
+    """Delete one tracking row (by token or recipient email). Returns rows removed."""
+    if not target:
+        return 0
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT token FROM tracking WHERE token = ? OR lower(recipient) = lower(?)",
+            (target, target),
+        ).fetchall()
+        tokens = [r[0] for r in rows]
+        for t in tokens:
+            conn.execute("DELETE FROM tracking_events WHERE token = ?", (t,))
+            conn.execute("DELETE FROM tracking WHERE token = ?", (t,))
+        return len(tokens)
+
+
 # ---------------------------------------------------------------- dashboard
 
 
@@ -610,6 +626,16 @@ def handle(handler, method: str) -> bool:
     if path.rstrip("/").startswith("/api/tracking"):
         if not authorized(dict(handler.headers), query):
             _send(handler, 401, b'{"error":"unauthorized"}', "application/json")
+            return True
+        if path.rstrip("/").endswith("/purge"):
+            target = (query.get("target") or [""])[0]
+            removed = purge(target)
+            _send(
+                handler,
+                200,
+                json.dumps({"removed": removed, "target": target}, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+            )
             return True
         data = json.dumps(snapshot(), ensure_ascii=False).encode("utf-8")
         _send(handler, 200, data, "application/json; charset=utf-8")
