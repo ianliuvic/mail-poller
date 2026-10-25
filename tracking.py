@@ -234,7 +234,7 @@ def record(token: str, headers: dict, method: str, ip: str, query: dict) -> None
 
     with _connect() as conn:
         cur = conn.execute(
-            """SELECT at, ua, ip FROM tracking_events
+            """SELECT at, ua, ip, is_self, is_bot, is_proxy FROM tracking_events
                WHERE token = ? ORDER BY id DESC LIMIT 1""",
             (token,),
         )
@@ -244,8 +244,20 @@ def record(token: str, headers: dict, method: str, ip: str, query: dict) -> None
                 last_ts = datetime.datetime.fromisoformat(last[0]).timestamp()
             except Exception:
                 last_ts = 0
-            if last[1] == ua and last[2] == ip and now_ts - last_ts < DEDUPE_SECONDS:
-                return  # client fired twice in the same instant
+            # 只在「同一种命中」时才折叠：自己查看、代理预取、真人打开要分别记录，
+            # 否则先看过已发送（self）会把紧接着的真人打开吞掉。
+            same_kind = (
+                last[3] == info["is_self"]
+                and last[4] == info["is_bot"]
+                and last[5] == info["is_proxy"]
+            )
+            if (
+                same_kind
+                and last[1] == ua
+                and last[2] == ip
+                and now_ts - last_ts < DEDUPE_SECONDS
+            ):
+                return  # 同一客户端瞬时重复命中
 
         conn.execute(
             """INSERT INTO tracking_events
