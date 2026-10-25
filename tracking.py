@@ -19,8 +19,10 @@ Config:
 
 import base64
 import datetime
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import urllib.parse
 from http.cookies import SimpleCookie
@@ -81,7 +83,9 @@ def init_db() -> None:
                 subject              TEXT,
                 sender               TEXT,
                 source               TEXT,
-                created_via          TEXT
+                created_via          TEXT,
+                thread_key           TEXT,
+                parent_token         TEXT
             );
             CREATE TABLE IF NOT EXISTS tracking_events (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,7 +110,7 @@ def init_db() -> None:
         )
         # 兼容老库：新增列
         existing = {r[1] for r in conn.execute("PRAGMA table_info(tracking)")}
-        for col in ("subject", "sender", "source", "created_via"):
+        for col in ("subject", "sender", "source", "created_via", "thread_key", "parent_token"):
             if col not in existing:
                 conn.execute(f"ALTER TABLE tracking ADD COLUMN {col} TEXT")
 
@@ -121,17 +125,35 @@ def _b64url_decode(value: str) -> str:
 
 
 def decode_token(token: str) -> str:
-    """Return the recipient(s) encoded in the token, or '' when opaque."""
+    """Return the recipient(s) encoded in the token, or '' when opaque.
+
+    New tokens look like "<base64url(email)>~<unique>"; old ones are just base64.
+    """
     token = (token or "").strip()
     if not token:
         return ""
+    base = token.split("~", 1)[0]
     try:
-        text = _b64url_decode(token)
+        text = _b64url_decode(base)
     except Exception:
         return ""
     if "@" not in text:
         return ""
     return text
+
+
+_SUBJECT_PREFIX = re.compile(r"^\s*((re|fw|fwd|aw|回复|答复|转发)\s*[:：]\s*)+", re.I)
+
+
+def normalize_subject(value: str) -> str:
+    text = _SUBJECT_PREFIX.sub("", value or "")
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text
+
+
+def thread_key(recipient: str, subject: str) -> str:
+    raw = (recipient or "").strip().lower() + "|" + normalize_subject(subject)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------- classify
@@ -253,10 +275,10 @@ def record(token: str, headers: dict, method: str, ip: str, query: dict) -> None
         human = not info["is_proxy"] and not info["is_self"] and not info["is_bot"]
 
         conn.execute(
-            """INSERT INTO tracking (token, recipient, created_at)
-               VALUES (?,?,?)
+            """INSERT INTO tracking (token, recipient, created_at, thread_key)
+               VALUES (?,?,?,?)
                ON CONFLICT(token) DO NOTHING""",
-            (token, email, at),
+            (token, email, at, thread_key(email, "")),
         )
         conn.execute(
             """UPDATE tracking SET
@@ -321,6 +343,7 @@ def snapshot(limit: int = 500) -> dict:
             "opened": sum(1 for r in rows if r["first_open_at"]),
             "human_opened": sum(1 for r in rows if r["first_human_open_at"]),
             "unopened": sum(1 for r in rows if not r["first_open_at"]),
+            "contacts": len({(r["recipient"] or "").lower() for r in rows if r["recipient"]}),
             "today_human": sum(
                 1
                 for r in rows
@@ -333,10 +356,59 @@ def snapshot(limit: int = 500) -> dict:
             ).fetchone()[0],
         }
         del today
-        return {"summary": summary, "rows": result, "generated_at": _now()}
+
+        # 按客户聚合
+        contacts = {}
+        for r in rows:
+            key = (r["recipient"] or r["token"]).lower()
+            c = contacts.get(key)
+            if not c:
+                c = contacts[key] = {
+                    "recipient": r["recipient"] or r["token"],
+                    "emails": 0,
+                    "opened": 0,
+                    "human_opens": 0,
+                    "first_human_open_at": None,
+                    "last_open_at": None,
+                    "last_subject": "",
+                    "tokens": [],
+                }
+            c["emails"] += 1
+            if r["first_open_at"]:
+                c["opened"] += 1
+            c["human_opens"] += r["human_open_count"] or 0
+            if r["first_human_open_at"]:
+                if not c["first_human_open_at"] or r["first_human_open_at"] < c["first_human_open_at"]:
+                    c["first_human_open_at"] = r["first_human_open_at"]
+            if r["last_open_at"] and (not c["last_open_at"] or r["last_open_at"] > c["last_open_at"]):
+                c["last_open_at"] = r["last_open_at"]
+                c["last_subject"] = r["subject"] or ""
+            if not c["last_subject"] and r["subject"]:
+                c["last_subject"] = r["subject"]
+            c["tokens"].append(r["token"])
+
+        contact_rows = sorted(
+            contacts.values(),
+            key=lambda c: (c["last_open_at"] or "", c["emails"]),
+            reverse=True,
+        )
+
+        return {
+            "summary": summary,
+            "rows": result,
+            "contacts": contact_rows,
+            "generated_at": _now(),
+        }
 
 
-def register(token: str, recipient: str, subject: str, sender: str, source: str) -> bool:
+def register(
+    token: str,
+    recipient: str,
+    subject: str,
+    sender: str,
+    source: str,
+    parent: str = "",
+) -> bool:
     """Create or refresh a pixel record before any open happens.
 
     Used by the browser extension so the dashboard can list unopened pixels too.
@@ -349,15 +421,40 @@ def register(token: str, recipient: str, subject: str, sender: str, source: str)
         return False
     at = _now()
     with _connect() as conn:
+        thread = ""
+        parent = (parent or "").strip()
+        if parent:
+            row = conn.execute(
+                "SELECT thread_key FROM tracking WHERE token = ?", (parent,)
+            ).fetchone()
+            if row and row[0]:
+                thread = row[0]
+        if not thread:
+            thread = thread_key(email, subject)
+
         conn.execute(
-            """INSERT INTO tracking (token, recipient, created_at, subject, sender, source, created_via)
-               VALUES (?,?,?,?,?,?,?)
+            """INSERT INTO tracking
+                 (token, recipient, created_at, subject, sender, source, created_via,
+                  thread_key, parent_token)
+               VALUES (?,?,?,?,?,?,?,?,?)
                ON CONFLICT(token) DO UPDATE SET
-                 recipient = COALESCE(NULLIF(excluded.recipient,''), tracking.recipient),
-                 subject   = COALESCE(NULLIF(excluded.subject,''),   tracking.subject),
-                 sender    = COALESCE(NULLIF(excluded.sender,''),    tracking.sender),
-                 source    = COALESCE(NULLIF(excluded.source,''),    tracking.source)""",
-            (token, email, at, subject or "", sender or "", source or "", "extension"),
+                 recipient    = COALESCE(NULLIF(excluded.recipient,''), tracking.recipient),
+                 subject      = COALESCE(NULLIF(excluded.subject,''),   tracking.subject),
+                 sender       = COALESCE(NULLIF(excluded.sender,''),    tracking.sender),
+                 source       = COALESCE(NULLIF(excluded.source,''),    tracking.source),
+                 thread_key   = COALESCE(NULLIF(excluded.thread_key,''), tracking.thread_key),
+                 parent_token = COALESCE(NULLIF(excluded.parent_token,''), tracking.parent_token)""",
+            (
+                token,
+                email,
+                at,
+                subject or "",
+                sender or "",
+                source or "",
+                "extension",
+                thread,
+                parent or "",
+            ),
         )
     return True
 
@@ -532,6 +629,7 @@ def handle(handler, method: str) -> bool:
                 payload.get("subject", ""),
                 payload.get("sender", ""),
                 payload.get("source", ""),
+                payload.get("parent", ""),
             )
             _send(
                 handler,
