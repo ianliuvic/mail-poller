@@ -140,18 +140,17 @@ def decode_token(token: str) -> str:
 def classify(ua: str, dest: str, email: str, ip: str, referer: str = "") -> dict:
     ua_l = (ua or "").lower()
     ref_l = (referer or "").lower()
-    is_proxy = any(
-        k in ua_l for k in ("googleimageproxy", "yahoomailproxy", "outlookimageproxy")
-    )
+    is_proxy = 0
     client_type = "网页/客户端"
     if "googleimageproxy" in ua_l:
-        client_type = "Gmail 代理预取"
+        client_type = "Gmail（已读信号）"
     elif "yahoomailproxy" in ua_l:
-        client_type = "Yahoo 代理预取"
+        client_type = "Yahoo（已读信号）"
     elif "outlook" in ua_l or "microsoft office" in ua_l or "office365" in ua_l:
-        client_type = "Outlook"
+        client_type = "Outlook（已读信号）"
     elif "applewebkit" in ua_l and ("mail/" in ua_l or "applemail" in ua_l):
         client_type = "Apple Mail（可能预取）"
+        is_proxy = 1
     elif "thunderbird" in ua_l:
         client_type = "Thunderbird"
 
