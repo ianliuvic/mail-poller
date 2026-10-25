@@ -590,7 +590,7 @@ def handle(handler, method: str) -> bool:
             _send(handler, 404, b"not found", "text/plain")
             return True
         if method == "GET":
-            record(token.strip("/"), dict(handler.headers), method, _client_ip(handler), query)
+            record(token.strip("/"), handler.headers, method, _client_ip(handler), query)
         _send(
             handler,
             200,
@@ -605,7 +605,7 @@ def handle(handler, method: str) -> bool:
         return True
 
     if path.rstrip("/") in ("/tracking", "/tracking/index.html"):
-        if not authorized(dict(handler.headers), query):
+        if not authorized(handler.headers, query):
             _send(handler, 401, LOGIN_HTML.encode("utf-8"), "text/html; charset=utf-8")
             return True
         headers = []
@@ -624,7 +624,7 @@ def handle(handler, method: str) -> bool:
         return True
 
     if path.rstrip("/").startswith("/api/tracking"):
-        if not authorized(dict(handler.headers), query):
+        if not authorized(handler.headers, query):
             _send(handler, 401, b'{"error":"unauthorized"}', "application/json")
             return True
         if path.rstrip("/").endswith("/purge"):
