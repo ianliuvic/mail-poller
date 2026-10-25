@@ -181,6 +181,12 @@ def classify(ua: str, dest: str, email: str, ip: str, referer: str = "") -> dict
     if zoho_webmail:
         client_type = "Zoho 网页版（可能是自己查看）"
 
+    # Zoho 手机 App 打开「已发送」同样会加载像素；它的 UA 形如
+    # "Zoho%20Mail/478 CFNetwork/3860.700.2 Darwin/25.6.0"
+    zoho_app = ("zoho%20mail" in ua_l) or ("zoho mail" in ua_l) or ("zohomail" in ua_l)
+    if zoho_app:
+        client_type = "Zoho App（可能是自己查看）"
+
     is_bot = any(
         k in ua_l
         for k in (
@@ -199,7 +205,7 @@ def classify(ua: str, dest: str, email: str, ip: str, referer: str = "") -> dict
         )
     )
 
-    is_self = (email.lower() in SELF_EMAILS) or (ip in SELF_IPS) or zoho_webmail
+    is_self = (email.lower() in SELF_EMAILS) or (ip in SELF_IPS) or zoho_webmail or zoho_app
     is_direct = (dest or "").lower() == "document"
 
     return {
