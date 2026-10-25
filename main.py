@@ -42,6 +42,7 @@ from zoneinfo import ZoneInfo
 import mailai
 import hongxiu_rag
 import zoho_contacts
+import tracking
 
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
@@ -1444,6 +1445,8 @@ def handle_feishu_callback(body_bytes):
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
+        if tracking.handle(self, "GET"):
+            return
         if self.path.rstrip("/") == "/feishu/callback":
             qs = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(qs)
@@ -1469,6 +1472,8 @@ class Health(BaseHTTPRequestHandler):
         self.wfile.write(b"not found")
 
     def do_POST(self):
+        if tracking.handle(self, "POST"):
+            return
         if self.path.rstrip("/") == "/feishu/callback":
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length) if length > 0 else b""
@@ -1484,6 +1489,13 @@ class Health(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"not found")
 
+    def do_HEAD(self):
+        # 邮件客户端/扫描器常发 HEAD：返回图片头但不记录
+        if tracking.handle(self, "HEAD"):
+            return
+        self.send_response(200)
+        self.end_headers()
+
     def log_message(self, *a):
         pass
 
@@ -1495,6 +1507,10 @@ if __name__ == "__main__":
     )
     validate_knowledge_dir()
     validate_rag_config()
+    tracking.init_db()
+    log(
+        f"tracking: db={tracking.DB_PATH} dashboard={'protected' if tracking.PAGE_TOKEN else 'OPEN'}"
+    )
     threading.Thread(target=loop, daemon=True).start()
     threading.Thread(target=poll_watchdog_loop, daemon=True).start()
     threading.Thread(target=contacts_sync_loop, daemon=True).start()
