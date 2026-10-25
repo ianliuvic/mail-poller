@@ -1496,6 +1496,12 @@ class Health(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
+    def do_OPTIONS(self):
+        if tracking.handle(self, "OPTIONS"):
+            return
+        self.send_response(204)
+        self.end_headers()
+
     def log_message(self, *a):
         pass
 

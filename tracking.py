@@ -77,7 +77,11 @@ def init_db() -> None:
                 bot_count            INTEGER DEFAULT 0,
                 direct_count         INTEGER DEFAULT 0,
                 last_client_type     TEXT,
-                last_ip              TEXT
+                last_ip              TEXT,
+                subject              TEXT,
+                sender               TEXT,
+                source               TEXT,
+                created_via          TEXT
             );
             CREATE TABLE IF NOT EXISTS tracking_events (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,6 +104,11 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS ix_events_at ON tracking_events(at);
             """
         )
+        # 兼容老库：新增列
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(tracking)")}
+        for col in ("subject", "sender", "source", "created_via"):
+            if col not in existing:
+                conn.execute(f"ALTER TABLE tracking ADD COLUMN {col} TEXT")
 
 
 # ---------------------------------------------------------------- decoding
@@ -283,7 +292,7 @@ def snapshot(limit: int = 500) -> dict:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """SELECT * FROM tracking
-               ORDER BY COALESCE(last_open_at, created_at) DESC
+               ORDER BY COALESCE(created_at, '') DESC, COALESCE(last_open_at, '') DESC
                LIMIT ?""",
             (limit,),
         ).fetchall()
@@ -306,6 +315,7 @@ def snapshot(limit: int = 500) -> dict:
             "tracked": len(rows),
             "opened": sum(1 for r in rows if r["first_open_at"]),
             "human_opened": sum(1 for r in rows if r["first_human_open_at"]),
+            "unopened": sum(1 for r in rows if not r["first_open_at"]),
             "today_human": sum(
                 1
                 for r in rows
@@ -321,8 +331,33 @@ def snapshot(limit: int = 500) -> dict:
         return {"summary": summary, "rows": result, "generated_at": _now()}
 
 
+def register(token: str, recipient: str, subject: str, sender: str, source: str) -> bool:
+    """Create or refresh a pixel record before any open happens.
+
+    Used by the browser extension so the dashboard can list unopened pixels too.
+    """
+    token = (token or "").strip()
+    if not token or len(token) > 512:
+        return False
+    email = (recipient or "").strip() or decode_token(token)
+    if "@" not in email:
+        return False
+    at = _now()
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO tracking (token, recipient, created_at, subject, sender, source, created_via)
+               VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(token) DO UPDATE SET
+                 recipient = COALESCE(NULLIF(excluded.recipient,''), tracking.recipient),
+                 subject   = COALESCE(NULLIF(excluded.subject,''),   tracking.subject),
+                 sender    = COALESCE(NULLIF(excluded.sender,''),    tracking.sender),
+                 source    = COALESCE(NULLIF(excluded.source,''),    tracking.source)""",
+            (token, email, at, subject or "", sender or "", source or "", "extension"),
+        )
+    return True
+
+
 def purge(target: str) -> int:
-    """Delete one tracking row (by token or recipient email). Returns rows removed."""
     if not target:
         return 0
     with _connect() as conn:
@@ -340,183 +375,18 @@ def purge(target: str) -> int:
 # ---------------------------------------------------------------- dashboard
 
 
-DASHBOARD_HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>邮件打开追踪</title>
-<style>
-  :root{--bg:#f6f7f9;--card:#fff;--line:#e6e8eb;--text:#1f2328;--muted:#6b7280;
-        --green:#137333;--amber:#b06000;--red:#c5221f;--blue:#1a73e8}
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--text);
-       font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",Arial,sans-serif}
-  .wrap{max-width:1080px;margin:0 auto;padding:24px 20px 60px}
-  h1{font-size:19px;margin:0 0 4px;display:flex;align-items:center;gap:8px}
-  .sub{color:var(--muted);font-size:12.5px;margin-bottom:18px}
-  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
-  .card .k{font-size:12px;color:var(--muted);margin-bottom:6px}
-  .card .v{font-size:24px;font-weight:700;letter-spacing:-.02em}
-  .card .v.green{color:var(--green)}
-  .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:10px}
-  input[type=search]{flex:1;padding:8px 11px;border:1px solid var(--line);border-radius:8px;
-        font:inherit;background:#fff;outline:none}
-  input[type=search]:focus{border-color:#c7cbd1}
-  button{padding:8px 14px;border:1px solid var(--line);background:#fff;border-radius:8px;
-        font:inherit;cursor:pointer}
-  button:hover{background:#f2f3f5}
-  table{width:100%;border-collapse:collapse;background:var(--card);
-        border:1px solid var(--line);border-radius:10px;overflow:hidden}
-  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);
-        font-size:13px;vertical-align:top}
-  th{background:#fafbfc;color:var(--muted);font-weight:600;font-size:12px;
-     position:sticky;top:0;cursor:default}
-  tr.row{cursor:pointer}
-  tr.row:hover{background:#fafbfc}
-  tr.row:last-child td{border-bottom:0}
-  .email{font-weight:600}
-  .badge{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;
-         border:1px solid transparent;margin-left:6px;vertical-align:1px}
-  .b-green{background:#e8f5ec;color:var(--green);border-color:#c6e3cf}
-  .b-amber{background:#fdf1e0;color:var(--amber);border-color:#f2d9b0}
-  .b-gray{background:#f1f3f4;color:var(--muted);border-color:#e3e5e8}
-  .b-red{background:#fce8e6;color:var(--red);border-color:#f3c8c3}
-  .muted{color:var(--muted)}
-  .events{background:#fbfcfd}
-  .events td{padding:0 12px 12px}
-  .ev{display:grid;grid-template-columns:150px 130px 150px 1fr;gap:8px;
-      padding:7px 0;border-top:1px dashed var(--line);font-size:12px}
-  .ev:first-child{border-top:0}
-  .ua{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .empty{padding:28px;text-align:center;color:var(--muted)}
-  code{background:#f1f3f4;padding:1px 5px;border-radius:4px;font-size:12px}
-  @media(max-width:760px){.cards{grid-template-columns:repeat(2,1fr)}
-    .ev{grid-template-columns:1fr 1fr}}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>📮 邮件打开追踪</h1>
-  <div class="sub" id="sub">加载中…</div>
+_HERE = os.path.dirname(os.path.abspath(__file__))
 
-  <div class="cards">
-    <div class="card"><div class="k">追踪对象</div><div class="v" id="m-tracked">–</div></div>
-    <div class="card"><div class="k">已打开</div><div class="v green" id="m-opened">–</div></div>
-    <div class="card"><div class="k">真人打开</div><div class="v" id="m-human">–</div></div>
-    <div class="card"><div class="k">今日事件</div><div class="v" id="m-today">–</div></div>
-  </div>
 
-  <div class="toolbar">
-    <input type="search" id="q" placeholder="搜索收件人邮箱…">
-    <button id="refresh">刷新</button>
-  </div>
+def _load_dashboard() -> str:
+    try:
+        with open(os.path.join(_HERE, "tracking_dashboard.html"), encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return "<h1>dashboard file missing</h1>"
 
-  <table>
-    <thead>
-      <tr>
-        <th style="width:26%">收件人</th>
-        <th style="width:17%">首次打开</th>
-        <th style="width:17%">最近打开</th>
-        <th style="width:8%">次数</th>
-        <th style="width:16%">客户端</th>
-        <th style="width:16%">标记</th>
-      </tr>
-    </thead>
-    <tbody id="rows"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
-  </table>
-</div>
 
-<script>
-const $ = (id) => document.getElementById(id);
-let DATA = { rows: [] };
-
-function fmt(iso){
-  if(!iso) return '<span class="muted">—</span>';
-  const d = new Date(iso);
-  if(isNaN(d)) return iso;
-  const p = (n)=>String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-function ago(iso){
-  if(!iso) return '';
-  const s = (Date.now() - new Date(iso).getTime())/1000;
-  if(s < 60) return '刚刚';
-  if(s < 3600) return Math.round(s/60)+' 分钟前';
-  if(s < 86400) return Math.round(s/3600)+' 小时前';
-  return Math.round(s/86400)+' 天前';
-}
-function esc(s){
-  return String(s??'').replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-}
-function badges(r){
-  const out=[];
-  if(r.first_human_open_at) out.push('<span class="badge b-green">真人已读</span>');
-  else if(r.first_open_at) out.push('<span class="badge b-amber">仅代理/自助</span>');
-  else out.push('<span class="badge b-gray">未打开</span>');
-  if(r.self_open_count) out.push('<span class="badge b-gray">自己打开 '+r.self_open_count+'</span>');
-  if(r.proxy_open_count) out.push('<span class="badge b-amber">代理 '+r.proxy_open_count+'</span>');
-  if(r.bot_count) out.push('<span class="badge b-red">扫描 '+r.bot_count+'</span>');
-  return out.join('');
-}
-function render(){
-  const q = $('q').value.trim().toLowerCase();
-  const rows = DATA.rows.filter(r=>!q || (r.recipient||'').toLowerCase().includes(q));
-  if(!rows.length){
-    $('rows').innerHTML = '<tr><td colspan="6" class="empty">没有记录</td></tr>';
-    return;
-  }
-  $('rows').innerHTML = rows.map((r,i)=>`
-    <tr class="row" data-i="${i}">
-      <td><div class="email">${esc(r.recipient || r.token)}</div>
-          <div class="muted" style="font-size:11.5px">${r.open_count} 次命中 · ${r.human_open_count} 次真人</div></td>
-      <td>${fmt(r.first_human_open_at || r.first_open_at)}</td>
-      <td>${fmt(r.last_open_at)} <span class="muted" style="font-size:11px">${ago(r.last_open_at)}</span></td>
-      <td>${r.open_count}</td>
-      <td>${esc(r.last_client_type || '—')}</td>
-      <td>${badges(r)}</td>
-    </tr>
-    <tr class="events" id="ev-${i}" style="display:none"><td colspan="6">
-      ${(r.events||[]).map(e=>`
-        <div class="ev">
-          <div>${fmt(e.at)}</div>
-          <div>${esc(e.client_type||'')}</div>
-          <div>${esc(e.ip||'')}</div>
-          <div class="ua" title="${esc(e.ua||'')}">${esc(e.ua||'')}${e.is_self?' · 自己':''}${e.is_bot?' · 机器人':''}${e.is_direct?' · 直接访问':''}</div>
-        </div>`).join('') || '<div class="muted">无事件</div>'}
-    </td></tr>`).join('');
-
-  document.querySelectorAll('tr.row').forEach(tr=>{
-    tr.addEventListener('click',()=>{
-      const ev = document.getElementById('ev-'+tr.dataset.i);
-      ev.style.display = ev.style.display === 'none' ? '' : 'none';
-    });
-  });
-}
-async function load(){
-  $('sub').textContent='加载中…';
-  try{
-    const res = await fetch('/api/tracking', {credentials:'same-origin'});
-    if(res.status===401){ location.href='/tracking'; return; }
-    DATA = await res.json();
-    $('m-tracked').textContent = DATA.summary.tracked;
-    $('m-opened').textContent  = DATA.summary.opened;
-    $('m-human').textContent   = DATA.summary.human_opened;
-    $('m-today').textContent   = DATA.summary.events_today;
-    $('sub').textContent = '更新于 ' + fmt(DATA.generated_at) + ' · 点击任意一行查看明细';
-    render();
-  }catch(err){
-    $('sub').textContent = '加载失败：' + err.message;
-  }
-}
-$('q').addEventListener('input', render);
-$('refresh').addEventListener('click', load);
-load();
-</script>
-</body>
-</html>
-"""
+DASHBOARD_HTML = _load_dashboard()
 
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>邮件打开追踪</title>
@@ -624,6 +494,44 @@ def handle(handler, method: str) -> bool:
         return True
 
     if path.rstrip("/").startswith("/api/tracking"):
+        if path.rstrip("/").endswith("/register"):
+            origin = handler.headers.get("origin", "")
+            cors = []
+            if origin in ("https://mail.zoho.com.cn", "https://mail.zoho.com"):
+                cors = [
+                    ("Access-Control-Allow-Origin", origin),
+                    ("Access-Control-Allow-Headers", "content-type, x-tracking-key"),
+                    ("Access-Control-Allow-Methods", "POST, OPTIONS"),
+                    ("Vary", "Origin"),
+                ]
+            if method == "OPTIONS":
+                _send(handler, 204, b"", "text/plain", cors)
+                return True
+            expected = os.environ.get("TRACKING_REGISTER_KEY", "") or PAGE_TOKEN
+            supplied = handler.headers.get("x-tracking-key", "") or (query.get("key") or [""])[0]
+            if expected and supplied != expected:
+                _send(handler, 401, b'{"error":"unauthorized"}', "application/json", cors)
+                return True
+            try:
+                length = int(handler.headers.get("content-length", 0) or 0)
+                payload = json.loads(handler.rfile.read(length) or b"{}")
+            except Exception:
+                payload = {}
+            ok = register(
+                payload.get("token", ""),
+                payload.get("recipient", ""),
+                payload.get("subject", ""),
+                payload.get("sender", ""),
+                payload.get("source", ""),
+            )
+            _send(
+                handler,
+                200 if ok else 400,
+                json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+                cors,
+            )
+            return True
         if not authorized(handler.headers, query):
             _send(handler, 401, b'{"error":"unauthorized"}', "application/json")
             return True
