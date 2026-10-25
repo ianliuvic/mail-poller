@@ -27,7 +27,7 @@ from http.cookies import SimpleCookie
 
 DB_PATH = os.environ.get("TRACKING_DB", "/data/tracking.db")
 PAGE_TOKEN = os.environ.get("TRACKING_PAGE_TOKEN", "").strip()
-DEDUPE_SECONDS = int(os.environ.get("TRACKING_DEDUPE_SECONDS", "10"))
+DEDUPE_SECONDS = int(os.environ.get("TRACKING_DEDUPE_SECONDS", "300"))
 
 SELF_EMAILS = {
     e.strip().lower()
@@ -137,8 +137,9 @@ def decode_token(token: str) -> str:
 # ---------------------------------------------------------------- classify
 
 
-def classify(ua: str, dest: str, email: str, ip: str) -> dict:
+def classify(ua: str, dest: str, email: str, ip: str, referer: str = "") -> dict:
     ua_l = (ua or "").lower()
+    ref_l = (referer or "").lower()
     is_proxy = any(
         k in ua_l for k in ("googleimageproxy", "yahoomailproxy", "outlookimageproxy")
     )
@@ -153,6 +154,11 @@ def classify(ua: str, dest: str, email: str, ip: str) -> dict:
         client_type = "Apple Mail（可能预取）"
     elif "thunderbird" in ua_l:
         client_type = "Thunderbird"
+
+    # 本机 Zoho 网页版打开「已发送」时也会加载图片，这类命中不算对外打开
+    zoho_webmail = "mail.zoho.com.cn" in ref_l or "mail.zoho.com" in ref_l
+    if zoho_webmail:
+        client_type = "Zoho 网页版（可能是自己查看）"
 
     is_bot = any(
         k in ua_l
@@ -172,7 +178,7 @@ def classify(ua: str, dest: str, email: str, ip: str) -> dict:
         )
     )
 
-    is_self = (email.lower() in SELF_EMAILS) or (ip in SELF_IPS)
+    is_self = (email.lower() in SELF_EMAILS) or (ip in SELF_IPS) or zoho_webmail
     is_direct = (dest or "").lower() == "document"
 
     return {
@@ -192,7 +198,7 @@ def record(token: str, headers: dict, method: str, ip: str, query: dict) -> None
     email = decode_token(token)
     ua = headers.get("user-agent", "")
     dest = headers.get("sec-fetch-dest", "")
-    info = classify(ua, dest, email, ip)
+    info = classify(ua, dest, email, ip, headers.get("referer", ""))
     if query.get("test"):
         info["is_self"] = 1
 
@@ -440,6 +446,10 @@ def _send(handler, status: int, body: bytes, content_type: str, extra_headers=No
 
 
 def _client_ip(handler) -> str:
+    # 有 Cloudflare 时取它给出的真实客户端地址
+    cf = handler.headers.get("cf-connecting-ip", "")
+    if cf:
+        return cf.strip()
     fwd = handler.headers.get("x-forwarded-for", "")
     if fwd:
         return fwd.split(",")[0].strip()

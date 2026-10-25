@@ -97,7 +97,7 @@
         <th style="width:12%">状态</th>
         <th style="width:16%">首次打开</th>
         <th style="width:16%">最近打开</th>
-        <th style="width:8%">次数</th>
+        <th style="width:8%">真人次数</th>
         <th style="width:18%">客户端</th>
       </tr>
     </thead>
@@ -164,7 +164,7 @@ function render(){
       <td>${statusBadge(r)}</td>
       <td>${fmt(r.first_human_open_at || r.first_open_at)}</td>
       <td>${fmt(r.last_open_at)} <span class="muted" style="font-size:11px">${ago(r.last_open_at)}</span></td>
-      <td>${r.open_count || 0}</td>
+      <td title="总命中 ${r.open_count || 0} 次">${r.human_open_count || 0}</td>
       <td>${esc(r.last_client_type || '—')}</td>
     </tr>
     <tr class="events" id="ev-${i}" style="display:none"><td colspan="6">
