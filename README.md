@@ -66,3 +66,28 @@
   - `guided_reply`：询盘卡片底部「指导意见」多行输入框（卡片 JSON 2.0 textarea）——你输入观点后点「生成指导型回复」，LLM 结合你的指导意见生成草稿推给你，同样不发送；
   - `save_draft`：草稿卡片上的「📥 存入 Zoho 草稿」——通过 **Zoho Mail 官方「保存草稿」API**（`mode=draft` + `inReplyTo`/`refHeader`）存为**原邮件的回复草稿**（Zoho 保证串线），不发送。
 - 在飞书开放平台给应用配置「事件订阅」时，把请求地址填为 `https://<域名>/feishu/callback`，并填写 `FEISHU_VERIFICATION_TOKEN` 环境变量。
+
+## 邮件打开追踪（像素）
+
+- 端点：`GET /t/<token>.gif` —— 返回 42 字节 1x1 透明 GIF，同时把这次命中写入 `/data/tracking.db`（SQLite，WAL）。
+- token = 收件人邮箱的 base64url（多收件人用逗号连接）。**不需要预注册**，第一次命中就建行。
+- 面板：`/tracking`（需要 `TRACKING_PAGE_TOKEN`，访问 `?token=...` 后写 Cookie）。
+- 数据：`GET /api/tracking?token=...`，返回汇总 + 每个收件人的首开/最近/次数/客户端 + 事件明细。
+- 清理：`GET /api/tracking/purge?token=...&target=<邮箱或token>`，删除测试记录。
+
+环境变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `TRACKING_DB` | SQLite 路径，默认 `/data/tracking.db` |
+| `TRACKING_PAGE_TOKEN` | 面板口令；为空则面板公开（不要留空） |
+| `TRACKING_SELF_EMAILS` | 视为「自己打开」的地址，默认 `ian@wearhongxiu.com,service@wearhongxiu.com` |
+| `TRACKING_SELF_IPS` | 额外的自家出口 IP，逗号分隔 |
+| `TRACKING_DEDUPE_SECONDS` | 同一客户端瞬时重复命中折叠窗口，默认 10 秒 |
+
+统计口径：
+
+- `open_count`：有效命中（不含机器人/扫描器/直接访问）。
+- `first_open_at`：首次有效命中（可能是 Gmail/Apple 预取）。
+- `first_human_open_at`：首次**真人**命中（排除代理预取、自己打开、扫描器）。
+- `proxy_open_count` / `self_open_count` / `bot_count`：分别记录预取、自己、扫描器。
