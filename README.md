@@ -72,6 +72,8 @@
 - 端点：`GET /t/<token>.gif` —— 返回 42 字节 1x1 透明 GIF，同时把这次命中写入 `/data/tracking.db`（SQLite，WAL）。
 - token = 收件人邮箱的 base64url（多收件人用逗号连接）。**不需要预注册**，第一次命中就建行。
 - 面板：`/tracking`（需要 `TRACKING_PAGE_TOKEN`，访问 `?token=...` 后写 Cookie）。
+- 登记：`POST /api/tracking/register`（`X-Tracking-Key`，默认等于 `TRACKING_PAGE_TOKEN`）——
+  浏览器插件在插入像素时调用，让**还没被打开**的邮件也能出现在面板里；不登记的话只有被打开后才出现。
 - 数据：`GET /api/tracking?token=...`，返回汇总 + 每个收件人的首开/最近/次数/客户端 + 事件明细。
 - 清理：`GET /api/tracking/purge?token=...&target=<邮箱或token>`，删除测试记录。
 
