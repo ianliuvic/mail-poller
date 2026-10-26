@@ -85,7 +85,8 @@ def init_db() -> None:
                 source               TEXT,
                 created_via          TEXT,
                 thread_key           TEXT,
-                parent_token         TEXT
+                parent_token         TEXT,
+                manual_read_at       TEXT
             );
             CREATE TABLE IF NOT EXISTS tracking_events (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,7 +111,7 @@ def init_db() -> None:
         )
         # 兼容老库：新增列
         existing = {r[1] for r in conn.execute("PRAGMA table_info(tracking)")}
-        for col in ("subject", "sender", "source", "created_via", "thread_key", "parent_token"):
+        for col in ("subject", "sender", "source", "created_via", "thread_key", "parent_token", "manual_read_at"):
             if col not in existing:
                 conn.execute(f"ALTER TABLE tracking ADD COLUMN {col} TEXT")
 
@@ -363,9 +364,10 @@ def snapshot(limit: int = 500) -> dict:
         today = datetime.datetime.now(TZ).date().isoformat()
         summary = {
             "tracked": len(rows),
-            "opened": sum(1 for r in rows if r["first_open_at"]),
-            "human_opened": sum(1 for r in rows if r["first_human_open_at"]),
-            "unopened": sum(1 for r in rows if not r["first_open_at"]),
+            "opened": sum(1 for r in rows if r["first_open_at"] or r["manual_read_at"]),
+            "human_opened": sum(1 for r in rows if r["first_human_open_at"] or r["manual_read_at"]),
+            "manual": sum(1 for r in rows if r["manual_read_at"]),
+            "unopened": sum(1 for r in rows if not r["first_open_at"] and not r["manual_read_at"]),
             "contacts": len({(r["recipient"] or "").lower() for r in rows if r["recipient"]}),
             "today_human": sum(
                 1
@@ -397,9 +399,13 @@ def snapshot(limit: int = 500) -> dict:
                     "tokens": [],
                 }
             c["emails"] += 1
-            if r["first_open_at"]:
+            if r["first_open_at"] or r["manual_read_at"]:
                 c["opened"] += 1
             c["human_opens"] += r["human_open_count"] or 0
+            if r["manual_read_at"]:
+                c["human_opens"] += 1
+                if not c["first_human_open_at"] or r["manual_read_at"] < c["first_human_open_at"]:
+                    c["first_human_open_at"] = r["manual_read_at"]
             if r["first_human_open_at"]:
                 if not c["first_human_open_at"] or r["first_human_open_at"] < c["first_human_open_at"]:
                     c["first_human_open_at"] = r["first_human_open_at"]
@@ -478,6 +484,22 @@ def register(
                 thread,
                 parent or "",
             ),
+        )
+    return True
+
+
+def mark_read(token: str, clear: bool = False) -> bool:
+    """Manually mark an email as read (e.g. the buyer confirmed via WhatsApp)."""
+    token = (token or "").strip()
+    if not token:
+        return False
+    with _connect() as conn:
+        row = conn.execute("SELECT token FROM tracking WHERE token = ?", (token,)).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE tracking SET manual_read_at = ? WHERE token = ?",
+            (None if clear else _now(), token),
         )
     return True
 
@@ -664,6 +686,20 @@ def handle(handler, method: str) -> bool:
             return True
         if not authorized(handler.headers, query):
             _send(handler, 401, b'{"error":"unauthorized"}', "application/json")
+            return True
+        if path.rstrip("/").endswith("/mark"):
+            try:
+                length = int(handler.headers.get("content-length", 0) or 0)
+                payload = json.loads(handler.rfile.read(length) or b"{}")
+            except Exception:
+                payload = {}
+            ok = mark_read(payload.get("token", ""), bool(payload.get("clear")))
+            _send(
+                handler,
+                200 if ok else 404,
+                json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+            )
             return True
         if path.rstrip("/").endswith("/purge"):
             target = (query.get("target") or [""])[0]

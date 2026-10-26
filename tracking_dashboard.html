@@ -58,6 +58,7 @@
   .b-amber{background:#fdf1e0;color:var(--amber);border-color:#f2d9b0}
   .b-gray{background:#f1f3f4;color:var(--muted);border-color:#e3e5e8}
   .b-red{background:#fce8e6;color:var(--red);border-color:#f3c8c3}
+  .b-blue{background:#e8f0fe;color:#1a73e8;border-color:#c6dafc}
   .muted{color:var(--muted)}
   .events{background:#fbfcfd}
   .events td{padding:0 12px 12px}
@@ -170,6 +171,7 @@ function esc(s){
 }
 function statusBadge(r){
   if(r.first_human_open_at) return '<span class="badge b-green">真人已读</span>';
+  if(r.manual_read_at) return '<span class="badge b-blue">人工确认</span>';
   if(r.first_open_at) return '<span class="badge b-amber">仅代理/自助</span>';
   if(r.bot_count) return '<span class="badge b-red">仅扫描器</span>';
   return '<span class="badge b-gray">未打开</span>';
@@ -183,9 +185,9 @@ function matches(r){
     const hay = ((r.recipient||'') + ' ' + (r.subject||'')).toLowerCase();
     if(!hay.includes(QUERY)) return false;
   }
-  if(FILTER==='unopened') return !r.first_open_at;
-  if(FILTER==='opened') return !!r.first_open_at;
-  if(FILTER==='human') return !!r.first_human_open_at;
+  if(FILTER==='unopened') return !r.first_open_at && !r.manual_read_at;
+  if(FILTER==='opened') return !!(r.first_open_at || r.manual_read_at);
+  if(FILTER==='human') return !!(r.first_human_open_at || r.manual_read_at);
   return true;
 }
 function threadKeyOf(r){
@@ -202,15 +204,17 @@ function buildGroups(rows){
   for(const [k, items] of map){
     items.sort((a,b)=> String(b.created_at||'').localeCompare(String(a.created_at||'')));
     const latest = items[0];
-    const firstHuman = items.map(x=>x.first_human_open_at).filter(Boolean).sort()[0] || null;
+    const firstHuman = items
+      .flatMap(x=>[x.first_human_open_at, x.manual_read_at])
+      .filter(Boolean).sort()[0] || null;
     const lastOpen = items.map(x=>x.last_open_at).filter(Boolean).sort().pop() || null;
     groups.push({
       key:k, items, recipient: latest.recipient, subject: latest.subject,
       rootSubject: (items[items.length-1].subject || latest.subject || ''),
       count: items.length,
-      human: items.reduce((s,x)=>s+(x.human_open_count||0),0),
-      opened: items.some(x=>x.first_open_at),
-      humanOpened: items.some(x=>x.first_human_open_at),
+      human: items.reduce((s,x)=>s+(x.human_open_count||0)+(x.manual_read_at?1:0),0),
+      opened: items.some(x=>x.first_open_at || x.manual_read_at),
+      humanOpened: items.some(x=>x.first_human_open_at || x.manual_read_at),
       firstHuman, lastOpen,
       sortKey: lastOpen || latest.created_at || ''
     });
@@ -235,6 +239,7 @@ function emailRowHtml(r, uid, child, gi){
       <div class="actions">
         <a href="${zohoLink(r)}" target="_blank" rel="noopener">在 Zoho 中查看</a>
         <button data-copy="${esc(pix)}">复制像素</button>
+        <button data-mark="${esc(r.token)}" data-clear="${r.manual_read_at ? 1 : 0}">${r.manual_read_at ? '取消人工标记' : '标记已读'}</button>
       </div>
     </td>
   </tr>
@@ -271,6 +276,7 @@ function groupHeaderHtml(g, gi){
       <div class="actions">
         <button data-toggle="${gi}">展开 ${g.count} 封</button>
         <a href="${zohoLink(latest)}" target="_blank" rel="noopener">在 Zoho 中查看</a>
+        <button data-mark="${esc(latest.token)}" data-clear="${latest.manual_read_at ? 1 : 0}">${latest.manual_read_at ? '取消人工标记' : '标记最新一封已读'}</button>
       </div>
     </td>
   </tr>`;
@@ -326,6 +332,27 @@ function renderEmails(){
         btn.textContent = '已复制';
         setTimeout(()=>{ btn.textContent = old; }, 1500);
       }catch(err){ btn.textContent = '复制失败'; }
+    });
+  });
+  document.querySelectorAll('button[data-mark]').forEach(btn=>{
+    btn.addEventListener('click', async (e)=>{
+      e.stopPropagation();
+      const clear = btn.dataset.clear === '1';
+      btn.disabled = true;
+      btn.textContent = '处理中…';
+      try{
+        const res = await fetch('/api/tracking/mark', {
+          method:'POST',
+          credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({token: btn.dataset.mark, clear})
+        });
+        if(res.ok){ await load(); }
+        else { btn.disabled = false; btn.textContent = '操作失败'; }
+      }catch(err){
+        btn.disabled = false;
+        btn.textContent = '操作失败';
+      }
     });
   });
 }
