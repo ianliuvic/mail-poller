@@ -353,6 +353,10 @@ def snapshot(limit: int = 500) -> dict:
                 (row["token"],),
             ).fetchall()
             item = dict(row)
+            if not item.get("thread_key"):
+                item["thread_key"] = thread_key(
+                    item.get("recipient") or "", item.get("subject") or ""
+                )
             item["events"] = [dict(e) for e in events]
             result.append(item)
 

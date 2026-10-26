@@ -41,6 +41,13 @@
   th{background:#fafbfc;color:var(--muted);font-weight:600;font-size:12px}
   tr.row{cursor:pointer}
   tr.row:hover{background:#fafbfc}
+  tr.row.child td{background:#fff}
+  tr.row.child td:first-child{padding-left:30px}
+  tr.row.child .email{font-weight:500;font-size:12.5px}
+  tr.group{cursor:pointer;background:#fbfcfd}
+  tr.group:hover{background:#f3f5f8}
+  tr.group .email{display:flex;align-items:center;gap:6px}
+  tr.group .subject{color:#3c4043}
   tr.row:last-child td{border-bottom:0}
   .email{font-weight:600}
   .subject{color:#3c4043;font-size:12px;margin-top:2px;max-width:330px;
@@ -181,48 +188,132 @@ function matches(r){
   if(FILTER==='human') return !!r.first_human_open_at;
   return true;
 }
+function threadKeyOf(r){
+  return r.thread_key || ((r.recipient||'') + '|' + (r.subject||''));
+}
+function buildGroups(rows){
+  const map = new Map();
+  rows.forEach(r=>{
+    const k = threadKeyOf(r);
+    if(!map.has(k)) map.set(k, []);
+    map.get(k).push(r);
+  });
+  const groups = [];
+  for(const [k, items] of map){
+    items.sort((a,b)=> String(b.created_at||'').localeCompare(String(a.created_at||'')));
+    const latest = items[0];
+    const firstHuman = items.map(x=>x.first_human_open_at).filter(Boolean).sort()[0] || null;
+    const lastOpen = items.map(x=>x.last_open_at).filter(Boolean).sort().pop() || null;
+    groups.push({
+      key:k, items, recipient: latest.recipient, subject: latest.subject,
+      count: items.length,
+      human: items.reduce((s,x)=>s+(x.human_open_count||0),0),
+      opened: items.some(x=>x.first_open_at),
+      humanOpened: items.some(x=>x.first_human_open_at),
+      firstHuman, lastOpen,
+      sortKey: lastOpen || latest.created_at || ''
+    });
+  }
+  groups.sort((a,b)=> String(b.sortKey).localeCompare(String(a.sortKey)));
+  return groups;
+}
+function emailRowHtml(r, uid, child, gi){
+  const pix = location.origin + '/t/' + r.token + '.gif';
+  const childAttr = child ? ` data-g="${gi}" style="display:none"` : '';
+  return `
+  <tr class="row${child?' child':''}" data-i="${uid}"${childAttr}>
+    <td>
+      <div class="email">${esc(r.recipient || r.token)}</div>
+      ${r.subject ? `<div class="subject" title="${esc(r.subject)}">${esc(r.subject)}</div>` : ''}
+    </td>
+    <td>${statusBadge(r)}</td>
+    <td>${fmt(r.first_human_open_at || r.first_open_at)}</td>
+    <td>${fmt(r.last_open_at)} <span class="muted" style="font-size:11px">${ago(r.last_open_at)}</span></td>
+    <td title="总命中 ${r.open_count || 0} 次">${r.human_open_count || 0}</td>
+    <td>
+      <div class="actions">
+        <a href="${zohoLink(r)}" target="_blank" rel="noopener">在 Zoho 中查看</a>
+        <button data-copy="${esc(pix)}">复制像素</button>
+      </div>
+    </td>
+  </tr>
+  <tr class="events" id="ev-${uid}" style="display:none"><td colspan="6">
+    <div class="pix"><span class="muted">像素</span><code title="${esc(pix)}">${esc(pix)}</code></div>
+    ${(r.events||[]).map(e=>`
+      <div class="ev">
+        <div>${fmt(e.at)}</div>
+        <div>${esc(e.client_type||'')}</div>
+        <div>${esc(e.ip||'')}</div>
+        <div class="ua" title="${esc(e.ua||'')}">${esc(e.ua||'')}${e.is_self?' · 自己':''}${e.is_bot?' · 机器人':''}${e.is_direct?' · 直接访问':''}</div>
+      </div>`).join('') || '<div class="muted" style="padding:6px 0">还没有任何打开记录</div>'}
+  </td></tr>`;
+}
+function groupHeaderHtml(g, gi){
+  const latest = g.items[0];
+  const badge = g.humanOpened
+    ? '<span class="badge b-green">真人已读</span>'
+    : g.opened
+    ? '<span class="badge b-amber">仅代理/自助</span>'
+    : '<span class="badge b-gray">未打开</span>';
+  return `
+  <tr class="group" data-gi="${gi}">
+    <td>
+      <div class="email">${esc(g.recipient || latest.token)}
+        <span class="badge b-gray">${g.count} 封</span></div>
+      <div class="subject" title="${esc(g.subject || '')}">${esc(g.subject || '—')}</div>
+    </td>
+    <td>${badge}</td>
+    <td>${fmt(g.firstHuman)}</td>
+    <td>${fmt(g.lastOpen)} <span class="muted" style="font-size:11px">${ago(g.lastOpen)}</span></td>
+    <td>${g.human}</td>
+    <td>
+      <div class="actions">
+        <button data-toggle="${gi}">展开 ${g.count} 封</button>
+        <a href="${zohoLink(latest)}" target="_blank" rel="noopener">在 Zoho 中查看</a>
+      </div>
+    </td>
+  </tr>`;
+}
 function renderEmails(){
   const rows = DATA.rows.filter(matches);
   if(!rows.length){
     $('rows').innerHTML = '<tr><td colspan="6" class="empty">没有符合条件的邮件</td></tr>';
     return;
   }
-  $('rows').innerHTML = rows.map((r,i)=>{
-    const pix = location.origin + '/t/' + r.token + '.gif';
-    return `
-    <tr class="row" data-i="${i}">
-      <td>
-        <div class="email">${esc(r.recipient || r.token)}</div>
-        ${r.subject ? `<div class="subject" title="${esc(r.subject)}">${esc(r.subject)}</div>` : ''}
-      </td>
-      <td>${statusBadge(r)}</td>
-      <td>${fmt(r.first_human_open_at || r.first_open_at)}</td>
-      <td>${fmt(r.last_open_at)} <span class="muted" style="font-size:11px">${ago(r.last_open_at)}</span></td>
-      <td title="总命中 ${r.open_count || 0} 次">${r.human_open_count || 0}</td>
-      <td>
-        <div class="actions">
-          <a href="${zohoLink(r)}" target="_blank" rel="noopener">在 Zoho 中查看</a>
-          <button data-copy="${esc(pix)}">复制像素</button>
-        </div>
-      </td>
-    </tr>
-    <tr class="events" id="ev-${i}" style="display:none"><td colspan="6">
-      <div class="pix"><span class="muted">像素</span><code title="${esc(pix)}">${esc(pix)}</code></div>
-      ${(r.events||[]).map(e=>`
-        <div class="ev">
-          <div>${fmt(e.at)}</div>
-          <div>${esc(e.client_type||'')}</div>
-          <div>${esc(e.ip||'')}</div>
-          <div class="ua" title="${esc(e.ua||'')}">${esc(e.ua||'')}${e.is_self?' · 自己':''}${e.is_bot?' · 机器人':''}${e.is_direct?' · 直接访问':''}</div>
-        </div>`).join('') || '<div class="muted" style="padding:6px 0">还没有任何打开记录</div>'}
-    </td></tr>`;
-  }).join('');
+  const groups = buildGroups(rows);
+  let html = '';
+  let uid = 0;
+  groups.forEach((g, gi)=>{
+    if(g.items.length === 1){
+      html += emailRowHtml(g.items[0], uid++, false, gi);
+      return;
+    }
+    html += groupHeaderHtml(g, gi);
+    g.items.forEach(r=>{ html += emailRowHtml(r, uid++, true, gi); });
+  });
+  $('rows').innerHTML = html;
 
   document.querySelectorAll('tr.row').forEach(tr=>{
     tr.addEventListener('click',(e)=>{
       if(e.target.closest('.actions')) return;
       const ev = document.getElementById('ev-'+tr.dataset.i);
-      ev.style.display = ev.style.display === 'none' ? '' : 'none';
+      if(ev) ev.style.display = ev.style.display === 'none' ? '' : 'none';
+    });
+  });
+  document.querySelectorAll('tr.group').forEach(tr=>{
+    const gi = tr.dataset.gi;
+    const btn = tr.querySelector('[data-toggle]');
+    tr.addEventListener('click',(e)=>{
+      if(e.target.closest('a')) return;
+      const kids = [...document.querySelectorAll(`tr.child[data-g="${gi}"]`)];
+      if(!kids.length) return;
+      const open = kids[0].style.display === 'none';
+      kids.forEach(k=>{
+        k.style.display = open ? '' : 'none';
+        const ev = document.getElementById('ev-'+k.dataset.i);
+        if(ev) ev.style.display = 'none';
+      });
+      if(btn) btn.textContent = open ? '收起' : `展开 ${kids.length} 封`;
     });
   });
   document.querySelectorAll('button[data-copy]').forEach(btn=>{
