@@ -206,6 +206,7 @@ function buildGroups(rows){
     const lastOpen = items.map(x=>x.last_open_at).filter(Boolean).sort().pop() || null;
     groups.push({
       key:k, items, recipient: latest.recipient, subject: latest.subject,
+      rootSubject: (items[items.length-1].subject || latest.subject || ''),
       count: items.length,
       human: items.reduce((s,x)=>s+(x.human_open_count||0),0),
       opened: items.some(x=>x.first_open_at),
@@ -260,7 +261,7 @@ function groupHeaderHtml(g, gi){
     <td>
       <div class="email">${esc(g.recipient || latest.token)}
         <span class="badge b-gray">${g.count} 封</span></div>
-      <div class="subject" title="${esc(g.subject || '')}">${esc(g.subject || '—')}</div>
+      <div class="subject" title="${esc(g.rootSubject || '')}">${esc(g.rootSubject || '—')}</div>
     </td>
     <td>${badge}</td>
     <td>${fmt(g.firstHuman)}</td>
