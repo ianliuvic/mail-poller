@@ -234,7 +234,7 @@ def record(token: str, headers: dict, method: str, ip: str, query: dict) -> None
 
     with _connect() as conn:
         cur = conn.execute(
-            """SELECT at, ua, ip, is_self, is_bot, is_proxy FROM tracking_events
+            """SELECT at, ua, ip, is_self, is_bot, is_proxy, client_type FROM tracking_events
                WHERE token = ? ORDER BY id DESC LIMIT 1""",
             (token,),
         )
@@ -251,11 +251,12 @@ def record(token: str, headers: dict, method: str, ip: str, query: dict) -> None
                 and last[4] == info["is_bot"]
                 and last[5] == info["is_proxy"]
             )
+            # Gmail/Outlook 的图片代理常从不同出口 IP 连发两次，IP 不能作为唯一依据
+            same_client = (last[6] or "") == info["client_type"]
             if (
                 same_kind
-                and last[1] == ua
-                and last[2] == ip
                 and now_ts - last_ts < DEDUPE_SECONDS
+                and ((last[1] == ua and last[2] == ip) or same_client)
             ):
                 return  # 同一客户端瞬时重复命中
 
