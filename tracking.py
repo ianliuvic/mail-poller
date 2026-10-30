@@ -450,6 +450,9 @@ def register(
         return False
     at = _now()
     with _connect() as conn:
+        existed = conn.execute(
+            "SELECT 1 FROM tracking WHERE token = ?", (token,)
+        ).fetchone()
         thread = ""
         parent = (parent or "").strip()
         if parent:
@@ -485,6 +488,15 @@ def register(
                 parent or "",
             ),
         )
+
+    if not existed:
+        try:
+            import followups as _followups
+
+            _followups.note_outbound(email, subject)
+        except Exception:
+            pass
+
     return True
 
 
@@ -641,6 +653,67 @@ def handle(handler, method: str) -> bool:
             DASHBOARD_HTML.encode("utf-8"),
             "text/html; charset=utf-8",
             headers,
+        )
+        return True
+
+    if path.rstrip("/").startswith("/api/followups"):
+        if not authorized(handler.headers, query):
+            _send(handler, 401, b'{"error":"unauthorized"}', "application/json")
+            return True
+        import followups as _fu
+
+        base = path.rstrip("/")
+        if base.endswith("/action"):
+            try:
+                length = int(handler.headers.get("content-length", 0) or 0)
+                payload = json.loads(handler.rfile.read(length) or b"{}")
+            except Exception:
+                payload = {}
+            ok = _fu.act(payload.get("recipient", ""), payload.get("action", ""))
+            _send(
+                handler,
+                200 if ok else 400,
+                json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+            )
+            return True
+
+        if base.endswith("/digest"):
+            import main as _main
+
+            res = _main.run_followup_digest(force=True)
+            _send(
+                handler,
+                200,
+                json.dumps(res, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+            )
+            return True
+
+        items = _fu.list_items()
+        now_iso = _now()
+        summary = {
+            "total": len(items),
+            "active": sum(1 for i in items if i["status"] == "active"),
+            "due": sum(
+                1
+                for i in items
+                if i["status"] == "active"
+                and i.get("next_due_at")
+                and i["next_due_at"] <= now_iso
+            ),
+            "paused": sum(1 for i in items if i["status"] == "paused"),
+            "replied": sum(1 for i in items if i["status"] == "replied"),
+            "given_up": sum(1 for i in items if i["status"] == "given_up"),
+        }
+        _send(
+            handler,
+            200,
+            json.dumps(
+                {"summary": summary, "items": items, "generated_at": _now()},
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            "application/json; charset=utf-8",
         )
         return True
 

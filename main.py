@@ -43,6 +43,7 @@ import mailai
 import hongxiu_rag
 import zoho_contacts
 import tracking
+import followups
 
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
@@ -637,6 +638,11 @@ def process_mail(item, contacts_emails, sent_mids, sent_recipients):
     subject = item["subject"]
     clean = mailai.strip_quotes(item["body"])
     from_addr = _extract_email(from_)
+    try:
+        if from_addr:
+            followups.note_reply(from_addr)
+    except Exception as e:
+        log("followup reply hook failed:", e)
     in_reply_to = item.get("in_reply_to", "")
     references = item.get("references", "")
     is_reply = _is_reply(in_reply_to, references, subject)
@@ -989,6 +995,64 @@ def weekly_report_loop():
         except Exception as e:
             log("weekly report error:", e)
             time.sleep(3600)
+
+
+# ---------- follow-up reminders ----------
+
+FOLLOWUP_HOUR = int(os.environ.get("FOLLOWUP_HOUR", "9"))
+FOLLOWUP_MINUTE = int(os.environ.get("FOLLOWUP_MINUTE", "30"))
+FOLLOWUP_TZ = os.environ.get("FOLLOWUP_TZ", "Asia/Shanghai")
+
+
+def seconds_until_next_followup_run(now=None):
+    tz = ZoneInfo(FOLLOWUP_TZ)
+    now = now or datetime.datetime.now(tz)
+    target = now.replace(hour=FOLLOWUP_HOUR, minute=FOLLOWUP_MINUTE, second=0, microsecond=0)
+    if target <= now:
+        target += datetime.timedelta(days=1)
+    # 跳过周末：提醒只在工作日发
+    while target.weekday() >= 5:
+        target += datetime.timedelta(days=1)
+    return max(1.0, (target - now).total_seconds())
+
+
+def run_followup_digest(force=False):
+    """Close stale cycles and push one digest when something is due."""
+    try:
+        closed = followups.expire_stale()
+        if closed:
+            log(f"followups: closed {closed} stale cycle(s)")
+    except Exception as e:
+        log("followups expire failed:", e)
+
+    items = followups.due_items()
+    if not items:
+        log("followups: nothing due today")
+        return {"due": 0}
+    if not force and not (FEISHU_APP_ID and FEISHU_APP_SECRET and RECEIVE_ID):
+        log("followups: feishu not configured, digest skipped")
+        return {"due": len(items)}
+    text = followups.build_digest(items)
+    try:
+        feishu_send(text)
+    except Exception as e:
+        log("followups: feishu send failed:", e)
+        return {"due": len(items), "error": str(e)}
+    log(f"followups: digest sent for {len(items)} customer(s)")
+    return {"due": len(items)}
+
+
+def followup_loop():
+    """Every weekday morning: nudge about customers who never replied."""
+    while True:
+        try:
+            delay = seconds_until_next_followup_run()
+            log(f"followups: next digest in {int(delay)}s")
+            time.sleep(delay)
+            run_followup_digest()
+        except Exception as e:
+            log("followups loop error:", e)
+            time.sleep(1800)
 
 
 # ---------- knowledge pack (reply-draft context) ----------
@@ -1514,6 +1578,13 @@ if __name__ == "__main__":
     validate_knowledge_dir()
     validate_rag_config()
     tracking.init_db()
+    followups.init_db()
+    try:
+        seeded = followups.backfill_from_tracking()
+        if seeded:
+            log(f"followups: seeded {seeded} customer(s) from existing tracking rows")
+    except Exception as e:
+        log("followups backfill failed:", e)
     log(
         f"tracking: db={tracking.DB_PATH} dashboard={'protected' if tracking.PAGE_TOKEN else 'OPEN'}"
     )
@@ -1521,4 +1592,5 @@ if __name__ == "__main__":
     threading.Thread(target=poll_watchdog_loop, daemon=True).start()
     threading.Thread(target=contacts_sync_loop, daemon=True).start()
     threading.Thread(target=weekly_report_loop, daemon=True).start()
+    threading.Thread(target=followup_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", PORT), Health).serve_forever()

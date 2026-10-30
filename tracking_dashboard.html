@@ -94,6 +94,7 @@
   <div class="tabs">
     <div class="tab on" data-view="email">按邮件</div>
     <div class="tab" data-view="contact">按客户</div>
+    <div class="tab" data-view="followup">待跟进</div>
   </div>
 
   <div id="emailView">
@@ -138,6 +139,31 @@
         </tr>
       </thead>
       <tbody id="rows2"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div id="followupView" style="display:none">
+    <div class="toolbar">
+      <div class="chips" style="margin:0">
+        <div class="chip on" data-ff="due">该跟进 <span id="c-due">0</span></div>
+        <div class="chip" data-ff="active">进行中 <span id="c-active">0</span></div>
+        <div class="chip" data-ff="paused">已暂停 <span id="c-paused">0</span></div>
+        <div class="chip" data-ff="closed">已结束 <span id="c-closed">0</span></div>
+      </div>
+      <button id="sendDigest" title="立即推送一次飞书提醒（测试用）">立即提醒</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:26%">客户</th>
+          <th style="width:12%">状态</th>
+          <th style="width:8%">已发</th>
+          <th style="width:16%">最后发送</th>
+          <th style="width:16%">下次提醒</th>
+          <th style="width:22%">操作</th>
+        </tr>
+      </thead>
+      <tbody id="rows3"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -382,12 +408,95 @@ function renderContacts(){
     });
   });
 }
+let FU = { items: [], summary: {} };
+let FF = 'due';
+
+function fuBadge(it){
+  if(it.status === 'replied') return '<span class="badge b-green">已回复</span>';
+  if(it.status === 'given_up') return '<span class="badge b-gray">已放弃</span>';
+  if(it.status === 'paused') return '<span class="badge b-amber">已暂停</span>';
+  const due = it.next_due_at && it.next_due_at <= new Date().toISOString();
+  return due ? '<span class="badge b-red">该跟进</span>' : '<span class="badge b-gray">等待中</span>';
+}
+function renderFollowups(){
+  const s = FU.summary || {};
+  const nowIso = new Date().toISOString();
+  $('c-due').textContent = s.due || 0;
+  $('c-active').textContent = s.active || 0;
+  $('c-paused').textContent = s.paused || 0;
+  $('c-closed').textContent = (s.replied || 0) + (s.given_up || 0);
+
+  const items = (FU.items || []).filter(it=>{
+    if(FF === 'due') return it.status === 'active' && it.next_due_at && it.next_due_at <= nowIso;
+    if(FF === 'active') return it.status === 'active';
+    if(FF === 'paused') return it.status === 'paused';
+    return it.status === 'replied' || it.status === 'given_up';
+  });
+  if(!items.length){
+    $('rows3').innerHTML = '<tr><td colspan="6" class="empty">没有符合条件的客户</td></tr>';
+    return;
+  }
+  $('rows3').innerHTML = items.map((it,i)=>`
+    <tr class="row" data-f="${i}">
+      <td>
+        <div class="email">${esc(it.recipient)}</div>
+        ${it.last_subject ? `<div class="subject" title="${esc(it.last_subject)}">${esc(it.last_subject)}</div>` : ''}
+        ${it.overdue_days ? `<div class="muted" style="font-size:11px">逾期 ${it.overdue_days} 天</div>` : ''}
+      </td>
+      <td>${fuBadge(it)}</td>
+      <td>${it.attempts || 0}</td>
+      <td>${fmt(it.last_outbound_at)}<div class="muted" style="font-size:11px">${it.days_since_last != null ? it.days_since_last + ' 天前' : ''}</div></td>
+      <td>${it.status === 'active' ? fmt(it.next_due_at) : '<span class="muted">—</span>'}</td>
+      <td>
+        <div class="actions">
+          <button data-fu="snooze" data-r="${esc(it.recipient)}">已跟进</button>
+          ${it.status === 'paused'
+            ? `<button data-fu="resume" data-r="${esc(it.recipient)}">恢复</button>`
+            : `<button data-fu="pause" data-r="${esc(it.recipient)}">暂停</button>`}
+          <button data-fu="replied" data-r="${esc(it.recipient)}">已回复</button>
+          <button data-fu="give_up" data-r="${esc(it.recipient)}">放弃</button>
+        </div>
+      </td>
+    </tr>`).join('');
+
+  document.querySelectorAll('button[data-fu]').forEach(btn=>{
+    btn.addEventListener('click', async (e)=>{
+      e.stopPropagation();
+      const recipient = btn.dataset.r;
+      const action = btn.dataset.fu;
+      btn.disabled = true;
+      try{
+        const res = await fetch('/api/followups/action', {
+          method:'POST', credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({recipient, action})
+        });
+        if(res.ok){ await loadFollowups(); }
+        else { btn.disabled = false; btn.textContent = '失败'; }
+      }catch(err){ btn.disabled = false; }
+    });
+  });
+}
+async function loadFollowups(){
+  $('rows3').innerHTML = '<tr><td colspan="6" class="empty">加载中…</td></tr>';
+  try{
+    const res = await fetch('/api/followups', {credentials:'same-origin'});
+    if(res.status === 401){ location.href = '/tracking'; return; }
+    FU = await res.json();
+    renderFollowups();
+  }catch(err){
+    $('rows3').innerHTML = '<tr><td colspan="6" class="empty">加载失败：' + esc(err.message) + '</td></tr>';
+  }
+}
 function switchView(v){
   VIEW = v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on', t.dataset.view===v));
   $('emailView').style.display = v==='email' ? '' : 'none';
   $('contactView').style.display = v==='contact' ? '' : 'none';
-  v==='email' ? renderEmails() : renderContacts();
+  $('followupView').style.display = v==='followup' ? '' : 'none';
+  if(v==='email') renderEmails();
+  else if(v==='contact') renderContacts();
+  else loadFollowups();
 }
 async function load(){
   $('sub').textContent = '加载中…';
@@ -420,6 +529,29 @@ document.querySelectorAll('.chip').forEach(c=>{
 document.querySelectorAll('.tab').forEach(t=>{
   t.addEventListener('click', ()=>switchView(t.dataset.view));
 });
+document.querySelectorAll('.chip[data-ff]').forEach(c=>{
+  c.addEventListener('click', ()=>{
+    document.querySelectorAll('.chip[data-ff]').forEach(x=>x.classList.remove('on'));
+    c.classList.add('on');
+    FF = c.dataset.ff;
+    renderFollowups();
+  });
+});
+const digestBtn = $('sendDigest');
+if(digestBtn){
+  digestBtn.addEventListener('click', async ()=>{
+    digestBtn.disabled = true;
+    try{
+      const res = await fetch('/api/followups/digest', {method:'POST', credentials:'same-origin'});
+      const j = await res.json().catch(()=>({}));
+      alert('已推送 ' + (j.due ?? 0) + ' 个客户的提醒');
+      await loadFollowups();
+    }catch(err){
+      alert('推送失败：' + err.message);
+    }
+    digestBtn.disabled = false;
+  });
+}
 load();
 </script>
 </body>
