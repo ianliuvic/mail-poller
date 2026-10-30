@@ -259,7 +259,7 @@ function emailRowHtml(r, uid, child, gi){
       ${r.subject ? `<div class="subject" title="${esc(r.subject)}">${esc(r.subject)}</div>` : ''}
     </td>
     <td>${statusBadge(r)}</td>
-    <td>${fmt(r.first_human_open_at || r.first_open_at)}</td>
+    <td>${fmt(r.first_human_open_at || r.manual_read_at)}</td>
     <td>${fmt(r.last_human_open_at)} <span class="muted" style="font-size:11px">${ago(r.last_human_open_at)}</span></td>
     <td title="总命中 ${r.open_count || 0} 次">${r.human_open_count || 0}</td>
     <td>
