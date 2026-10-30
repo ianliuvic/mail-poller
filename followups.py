@@ -218,6 +218,19 @@ def act(recipient: str, action: str) -> bool:
 # ---------------------------------------------------------------- reads
 
 
+_TRACKING_JOIN = """
+    LEFT JOIN (
+        SELECT lower(recipient) AS rcpt,
+               SUM(human_open_count) AS human_opens,
+               SUM(proxy_open_count) AS proxy_opens,
+               MAX(last_open_at)     AS last_open_at
+        FROM tracking
+        WHERE recipient IS NOT NULL AND recipient <> ''
+        GROUP BY lower(recipient)
+    ) t ON t.rcpt = f.recipient
+"""
+
+
 def _decorate(row: sqlite3.Row) -> dict:
     item = dict(row)
     due = _parse(item.get("next_due_at"))
@@ -227,33 +240,51 @@ def _decorate(row: sqlite3.Row) -> dict:
     )
     last = _parse(item.get("last_outbound_at"))
     item["days_since_last"] = (now - last).days if last else None
+    item["human_opens"] = item.get("human_opens") or 0
+    item["opened"] = bool(item["human_opens"])
     return item
 
 
 def list_items() -> list:
     with _connect() as conn:
-        rows = conn.execute(
-            """SELECT * FROM followups
-               ORDER BY CASE status
-                          WHEN 'active' THEN 0
-                          WHEN 'paused' THEN 1
-                          WHEN 'replied' THEN 2
-                          ELSE 3 END,
-                        COALESCE(next_due_at, '9999') ASC,
-                        last_outbound_at DESC"""
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                f"""SELECT f.*, t.human_opens, t.proxy_opens, t.last_open_at
+                    FROM followups f {_TRACKING_JOIN}
+                    ORDER BY CASE f.status
+                               WHEN 'active' THEN 0
+                               WHEN 'paused' THEN 1
+                               WHEN 'replied' THEN 2
+                               ELSE 3 END,
+                             COALESCE(f.next_due_at, '9999') ASC,
+                             f.last_outbound_at DESC"""
+            ).fetchall()
+        except sqlite3.Error:
+            rows = conn.execute(
+                "SELECT *, 0 AS human_opens, 0 AS proxy_opens, NULL AS last_open_at FROM followups"
+            ).fetchall()
     return [_decorate(r) for r in rows]
 
 
 def due_items(now: datetime.datetime = None) -> list:
     now = now or _now()
     with _connect() as conn:
-        rows = conn.execute(
-            """SELECT * FROM followups
-               WHERE status = ? AND next_due_at IS NOT NULL AND next_due_at <= ?
-               ORDER BY next_due_at ASC""",
-            (STATUS_ACTIVE, _iso(now)),
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                f"""SELECT f.*, t.human_opens, t.proxy_opens, t.last_open_at
+                    FROM followups f {_TRACKING_JOIN}
+                    WHERE f.status = ? AND f.next_due_at IS NOT NULL AND f.next_due_at <= ?
+                    ORDER BY (COALESCE(t.human_opens, 0) > 0) DESC, f.next_due_at ASC""",
+                (STATUS_ACTIVE, _iso(now)),
+            ).fetchall()
+        except sqlite3.Error:
+            rows = conn.execute(
+                """SELECT *, 0 AS human_opens, 0 AS proxy_opens, NULL AS last_open_at
+                   FROM followups
+                   WHERE status = ? AND next_due_at IS NOT NULL AND next_due_at <= ?
+                   ORDER BY next_due_at ASC""",
+                (STATUS_ACTIVE, _iso(now)),
+            ).fetchall()
     return [_decorate(r) for r in rows]
 
 
@@ -320,22 +351,28 @@ def backfill_from_tracking() -> int:
 
 def build_digest(items: list) -> str:
     shown = items[:10]
-    lines = [f"📬 今天该跟进（{len(items)}）"]
+    hot = sum(1 for it in items if it.get("opened"))
+    lines = [f"📬 今天该跟进（{len(items)}，其中 {hot} 个读过邮件）"]
     for it in shown:
         stage = it.get("attempts") or 1
         overdue = it.get("overdue_days") or 0
         since = it.get("days_since_last")
-        bits = [f"{it['recipient']}"]
+        bits = []
+        bits.append("🔥" if it.get("opened") else "·")
+        bits.append(it["recipient"])
         bits.append(f"第{stage}封")
         if since is not None:
             bits.append(f"已{since}天")
         if overdue > 0:
             bits.append(f"逾期{overdue}天")
+        if it.get("opened"):
+            bits.append(f"已读{it['human_opens']}次")
         subj = (it.get("last_subject") or "").strip()
         if subj:
-            bits.append(subj[:28])
-        lines.append("· " + " · ".join(bits))
+            bits.append(subj[:24])
+        lines.append(" ".join(bits))
     if len(items) > len(shown):
         lines.append(f"…还有 {len(items) - len(shown)} 个")
+    lines.append("🔥 = 读过但没回，优先跟进；其余建议换渠道")
     lines.append("打开面板：https://mail.wearhongxiu.com/tracking")
     return "\n".join(lines)

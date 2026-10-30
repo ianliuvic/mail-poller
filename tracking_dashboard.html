@@ -155,15 +155,16 @@
     <table>
       <thead>
         <tr>
-          <th style="width:26%">客户</th>
-          <th style="width:12%">状态</th>
-          <th style="width:8%">已发</th>
+          <th style="width:24%">客户</th>
+          <th style="width:10%">打开</th>
+          <th style="width:10%">状态</th>
+          <th style="width:7%">已发</th>
           <th style="width:16%">最后发送</th>
-          <th style="width:16%">下次提醒</th>
-          <th style="width:22%">操作</th>
+          <th style="width:15%">下次提醒</th>
+          <th style="width:18%">操作</th>
         </tr>
       </thead>
-      <tbody id="rows3"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+      <tbody id="rows3"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -431,18 +432,23 @@ function renderFollowups(){
     if(FF === 'active') return it.status === 'active';
     if(FF === 'paused') return it.status === 'paused';
     return it.status === 'replied' || it.status === 'given_up';
+  }).sort((a,b)=>{
+    if(FF !== 'due' && FF !== 'active') return 0;
+    if(!!b.opened !== !!a.opened) return b.opened ? 1 : -1;
+    return String(a.next_due_at||'').localeCompare(String(b.next_due_at||''));
   });
   if(!items.length){
-    $('rows3').innerHTML = '<tr><td colspan="6" class="empty">没有符合条件的客户</td></tr>';
+    $('rows3').innerHTML = '<tr><td colspan="7" class="empty">没有符合条件的客户</td></tr>';
     return;
   }
   $('rows3').innerHTML = items.map((it,i)=>`
     <tr class="row" data-f="${i}">
       <td>
-        <div class="email">${esc(it.recipient)}</div>
+        <div class="email">${it.opened ? '🔥 ' : ''}${esc(it.recipient)}</div>
         ${it.last_subject ? `<div class="subject" title="${esc(it.last_subject)}">${esc(it.last_subject)}</div>` : ''}
         ${it.overdue_days ? `<div class="muted" style="font-size:11px">逾期 ${it.overdue_days} 天</div>` : ''}
       </td>
+      <td>${it.human_opens ? `<span class="badge b-green">已读 ${it.human_opens}</span>` : '<span class="badge b-gray">未打开</span>'}</td>
       <td>${fuBadge(it)}</td>
       <td>${it.attempts || 0}</td>
       <td>${fmt(it.last_outbound_at)}<div class="muted" style="font-size:11px">${it.days_since_last != null ? it.days_since_last + ' 天前' : ''}</div></td>
