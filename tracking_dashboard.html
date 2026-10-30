@@ -41,12 +41,16 @@
   th{background:#fafbfc;color:var(--muted);font-weight:600;font-size:12px}
   tr.row{cursor:pointer}
   tr.row:hover{background:#fafbfc}
-  tr.row.child td{background:#fff}
-  tr.row.child td:first-child{padding-left:30px}
-  tr.row.child .email{font-weight:500;font-size:12.5px}
-  tr.group{cursor:pointer;background:#fbfcfd}
-  tr.group:hover{background:#f3f5f8}
-  tr.group .email{display:flex;align-items:center;gap:6px}
+  tr.row.child td{background:#fafcff}
+  tr.row.child td:first-child{border-left:3px solid #9fc0ea;padding-left:34px}
+  tr.row.child .email{font-weight:500;font-size:12.5px;display:flex;align-items:center;gap:6px}
+  tr.group td{background:#eef4fb;border-bottom:1px solid #d7e3f4}
+  tr.group{cursor:pointer}
+  tr.group:hover td{background:#e6eefa}
+  tr.group td:first-child{border-left:3px solid #1a73e8}
+  tr.group .email{font-weight:700}
+  .tmark{color:#1a73e8;font-weight:700}
+  .seq{background:#e8f0fe;color:#1a73e8;border-radius:999px;padding:0 7px;font-size:11px;font-weight:600}
   tr.group .subject{color:#3c4043}
   tr.row:last-child td{border-bottom:0}
   .email{font-weight:600}
@@ -249,13 +253,16 @@ function buildGroups(rows){
   groups.sort((a,b)=> String(b.sortKey).localeCompare(String(a.sortKey)));
   return groups;
 }
-function emailRowHtml(r, uid, child, gi){
+function emailRowHtml(r, uid, child, gi, seq){
   const pix = location.origin + '/t/' + r.token + '.gif';
   const childAttr = child ? ` data-g="${gi}" style="display:none"` : '';
+  const lead = child
+    ? `<span class="tmark">↳</span><span class="seq">第${seq}封</span>`
+    : '';
   return `
   <tr class="row${child?' child':''}" data-i="${uid}"${childAttr}>
     <td>
-      <div class="email">${esc(r.recipient || r.token)}</div>
+      <div class="email">${lead}${esc(r.recipient || r.token)}</div>
       ${r.subject ? `<div class="subject" title="${esc(r.subject)}">${esc(r.subject)}</div>` : ''}
     </td>
     <td>${statusBadge(r)}</td>
@@ -323,7 +330,7 @@ function renderEmails(){
       return;
     }
     html += groupHeaderHtml(g, gi);
-    g.items.forEach(r=>{ html += emailRowHtml(r, uid++, true, gi); });
+    g.items.forEach((r, idx)=>{ html += emailRowHtml(r, uid++, true, gi, g.items.length - idx); });
   });
   $('rows').innerHTML = html;
 
