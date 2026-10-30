@@ -29,6 +29,14 @@ STATUS_REPLIED = "replied"
 STATUS_PAUSED = "paused"
 STATUS_GIVEN_UP = "given_up"
 
+SELF_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get(
+        "TRACKING_SELF_EMAILS", "ian@wearhongxiu.com,service@wearhongxiu.com"
+    ).split(",")
+    if e.strip()
+}
+
 
 def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
@@ -75,6 +83,12 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS ix_followups_due ON followups(status, next_due_at);
             """
         )
+        # 自己给自己发的测试邮件不该进入跟进列表
+        if SELF_EMAILS:
+            marks = ",".join("?" * len(SELF_EMAILS))
+            conn.execute(
+                f"DELETE FROM followups WHERE recipient IN ({marks})", tuple(SELF_EMAILS)
+            )
 
 
 # ---------------------------------------------------------------- events
@@ -83,7 +97,7 @@ def init_db() -> None:
 def note_outbound(recipient: str, subject: str = "", when: datetime.datetime = None) -> None:
     """Record one outbound email; (re)start or advance the follow-up cycle."""
     recipient = (recipient or "").strip().lower()
-    if not recipient or "@" not in recipient:
+    if not recipient or "@" not in recipient or recipient in SELF_EMAILS:
         return
     now = when or _now()
     with _connect() as conn:
@@ -276,6 +290,8 @@ def backfill_from_tracking() -> int:
 
         added = 0
         for row in rows:
+            if (row["rcpt"] or "") in SELF_EMAILS:
+                continue
             attempts = min(int(row["n"] or 1), MAX_ATTEMPTS)
             last_at = _parse(row["last_at"]) or _now()
             due = _iso(last_at + datetime.timedelta(days=INTERVALS.get(attempts, 7)))
