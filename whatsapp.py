@@ -33,6 +33,17 @@ STATUS_REPLIED = "replied"
 STATUS_PAUSED = "paused"
 STATUS_GIVEN_UP = "given_up"
 
+# 非聊天事件：表情回复、协议消息、已读回执等，不能算作“我们发了消息”
+IGNORE_TYPES = {
+    "reactionMessage",
+    "protocolMessage",
+    "senderKeyDistributionMessage",
+    "pollUpdateMessage",
+    "callLogMessage",
+    "receiptMessage",
+    "messageContextInfo",
+}
+
 
 def _now():
     return datetime.datetime.now(datetime.timezone.utc)
@@ -177,7 +188,8 @@ def _store(records):
                 continue
             mid = key.get("id") or rec.get("id")
             ts = int(rec.get("messageTimestamp") or 0)
-            if not mid or not ts:
+            mtype = rec.get("messageType") or ""
+            if not mid or not ts or mtype in IGNORE_TYPES:
                 continue
             conn.execute(
                 """INSERT INTO wa_messages (id, jid, from_me, ts, mtype, text, push_name)
@@ -188,7 +200,7 @@ def _store(records):
                     jid,
                     1 if key.get("fromMe") else 0,
                     ts,
-                    rec.get("messageType") or "",
+                    mtype,
                     (_message_text(rec) or "")[:2000],
                     rec.get("pushName") or "",
                 ),
@@ -249,12 +261,30 @@ def _recompute(jid):
         )
 
 
+def _purge_non_chat():
+    """Drop already-stored reactions/receipts and return affected chats."""
+    placeholders = ",".join("?" * len(IGNORE_TYPES))
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT jid FROM wa_messages WHERE mtype IN ({placeholders})",
+            tuple(IGNORE_TYPES),
+        ).fetchall()
+        jids = [r["jid"] for r in rows]
+        if jids:
+            conn.execute(
+                f"DELETE FROM wa_messages WHERE mtype IN ({placeholders})",
+                tuple(IGNORE_TYPES),
+            )
+    return jids
+
+
 def sync(days: int = None) -> dict:
     if not configured():
         return {"ok": False, "reason": "evolution not configured"}
+    purged = _purge_non_chat()
     records = fetch_messages(days)
     touched = _store(records)
-    for jid in touched:
+    for jid in set(touched) | set(purged):
         _recompute(jid)
     return {"ok": True, "messages": len(records), "chats": len(touched)}
 
