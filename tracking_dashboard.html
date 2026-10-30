@@ -290,11 +290,21 @@ function emailRowHtml(r, uid, child, gi, seq){
 }
 function groupHeaderHtml(g, gi){
   const latest = g.items[0];
-  const badge = g.humanOpened
-    ? '<span class="badge b-green">真人已读</span>'
-    : g.opened
-    ? '<span class="badge b-amber">仅代理/自助</span>'
-    : '<span class="badge b-gray">未打开</span>';
+  const latestOpened = !!(latest.first_human_open_at || latest.manual_read_at);
+  const openedCount = g.items.filter(x=>x.first_human_open_at || x.manual_read_at).length;
+  let badge;
+  if(latestOpened){
+    badge = '<span class="badge b-green">真人已读</span>';
+  } else if(g.humanOpened){
+    badge = `<span class="badge b-amber" title="本组 ${g.count} 封已读 ${openedCount} 封，最新一封尚未打开">最新未读</span>`;
+  } else if(g.opened){
+    badge = '<span class="badge b-amber">仅代理/自助</span>';
+  } else {
+    badge = '<span class="badge b-gray">未打开</span>';
+  }
+  const ratio = g.count > 1
+    ? `<span class="badge b-gray">${openedCount}/${g.count} 已读</span>`
+    : '';
   return `
   <tr class="group" data-gi="${gi}">
     <td>
@@ -302,7 +312,7 @@ function groupHeaderHtml(g, gi){
         <span class="badge b-gray">${g.count} 封</span></div>
       <div class="subject" title="${esc(g.rootSubject || '')}">${esc(g.rootSubject || '—')}</div>
     </td>
-    <td>${badge}</td>
+    <td>${badge}${ratio}</td>
     <td>${fmt(g.firstHuman)}</td>
     <td>${fmt(g.lastOpen)} <span class="muted" style="font-size:11px">${ago(g.lastOpen)}</span></td>
     <td>${g.human}</td>
