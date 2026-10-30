@@ -1019,6 +1019,13 @@ def seconds_until_next_followup_run(now=None):
 def run_followup_digest(force=False):
     """Close stale cycles and push one digest when something is due."""
     try:
+        fixed = followups.reconcile_with_tracking()
+        if fixed:
+            log(f"followups: reconciled {fixed} outbound email(s) from tracking")
+    except Exception as e:
+        log("followups reconcile failed:", e)
+
+    try:
         closed = followups.expire_stale()
         if closed:
             log(f"followups: closed {closed} stale cycle(s)")
@@ -1583,6 +1590,9 @@ if __name__ == "__main__":
         seeded = followups.backfill_from_tracking()
         if seeded:
             log(f"followups: seeded {seeded} customer(s) from existing tracking rows")
+        fixed = followups.reconcile_with_tracking()
+        if fixed:
+            log(f"followups: reconciled {fixed} outbound email(s)")
     except Exception as e:
         log("followups backfill failed:", e)
     log(

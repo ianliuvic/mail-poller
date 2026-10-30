@@ -346,6 +346,37 @@ def backfill_from_tracking() -> int:
         return added
 
 
+def reconcile_with_tracking() -> int:
+    """Catch outbound emails that the live hook missed (restart/race).
+
+    Any tracked email newer than the customer's last_outbound_at counts as a new
+    touch. Runs at startup and before each digest, so reminders self-heal.
+    """
+    with _connect() as conn:
+        try:
+            rows = conn.execute(
+                """SELECT lower(t.recipient) AS rcpt, t.subject, t.created_at
+                   FROM tracking t
+                   LEFT JOIN followups f ON f.recipient = lower(t.recipient)
+                   WHERE t.recipient IS NOT NULL AND t.recipient <> ''
+                     AND t.created_at IS NOT NULL
+                     AND (f.recipient IS NULL OR t.created_at > f.last_outbound_at)
+                   ORDER BY t.created_at ASC"""
+            ).fetchall()
+        except sqlite3.Error:
+            return 0
+
+    added = 0
+    for row in rows:
+        when = _parse(row["created_at"]) or _now()
+        try:
+            note_outbound(row["rcpt"], row["subject"], when)
+            added += 1
+        except Exception:
+            continue
+    return added
+
+
 # ---------------------------------------------------------------- digest
 
 
