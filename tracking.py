@@ -72,6 +72,7 @@ def init_db() -> None:
                 first_open_at        TEXT,
                 first_human_open_at  TEXT,
                 last_open_at         TEXT,
+                last_human_open_at   TEXT,
                 open_count           INTEGER DEFAULT 0,
                 human_open_count     INTEGER DEFAULT 0,
                 proxy_open_count     INTEGER DEFAULT 0,
@@ -111,9 +112,19 @@ def init_db() -> None:
         )
         # 兼容老库：新增列
         existing = {r[1] for r in conn.execute("PRAGMA table_info(tracking)")}
-        for col in ("subject", "sender", "source", "created_via", "thread_key", "parent_token", "manual_read_at"):
+        for col in ("subject", "sender", "source", "created_via", "thread_key", "parent_token", "manual_read_at", "last_human_open_at"):
             if col not in existing:
                 conn.execute(f"ALTER TABLE tracking ADD COLUMN {col} TEXT")
+
+        # 老数据补齐：只统计真人命中（排除自己/代理/机器人）
+        conn.execute(
+            """UPDATE tracking SET last_human_open_at = (
+                   SELECT MAX(e.at) FROM tracking_events e
+                   WHERE e.token = tracking.token
+                     AND e.is_self = 0 AND e.is_bot = 0 AND e.is_proxy = 0
+               )
+               WHERE last_human_open_at IS NULL"""
+        )
 
 
 # ---------------------------------------------------------------- decoding
@@ -311,6 +322,7 @@ def record(token: str, headers: dict, method: str, ip: str, query: dict) -> None
                  first_open_at    = COALESCE(first_open_at, ?),
                  first_human_open_at = COALESCE(first_human_open_at, ?),
                  last_open_at     = COALESCE(?, last_open_at),
+                 last_human_open_at = COALESCE(?, last_human_open_at),
                  last_client_type = ?,
                  last_ip          = ?
                WHERE token = ?""",
@@ -324,6 +336,7 @@ def record(token: str, headers: dict, method: str, ip: str, query: dict) -> None
                 at if counted else None,
                 at if human else None,
                 at if counted else None,
+                at if human else None,
                 info["client_type"],
                 ip,
                 token,
@@ -409,8 +422,8 @@ def snapshot(limit: int = 500) -> dict:
             if r["first_human_open_at"]:
                 if not c["first_human_open_at"] or r["first_human_open_at"] < c["first_human_open_at"]:
                     c["first_human_open_at"] = r["first_human_open_at"]
-            if r["last_open_at"] and (not c["last_open_at"] or r["last_open_at"] > c["last_open_at"]):
-                c["last_open_at"] = r["last_open_at"]
+            if r["last_human_open_at"] and (not c["last_open_at"] or r["last_human_open_at"] > c["last_open_at"]):
+                c["last_open_at"] = r["last_human_open_at"]
                 c["last_subject"] = r["subject"] or ""
             if not c["last_subject"] and r["subject"]:
                 c["last_subject"] = r["subject"]

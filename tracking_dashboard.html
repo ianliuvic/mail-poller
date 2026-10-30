@@ -234,7 +234,7 @@ function buildGroups(rows){
     const firstHuman = items
       .flatMap(x=>[x.first_human_open_at, x.manual_read_at])
       .filter(Boolean).sort()[0] || null;
-    const lastOpen = items.map(x=>x.last_open_at).filter(Boolean).sort().pop() || null;
+    const lastOpen = items.map(x=>x.last_human_open_at).filter(Boolean).sort().pop() || null;
     groups.push({
       key:k, items, recipient: latest.recipient, subject: latest.subject,
       rootSubject: (items[items.length-1].subject || latest.subject || ''),
@@ -260,7 +260,7 @@ function emailRowHtml(r, uid, child, gi){
     </td>
     <td>${statusBadge(r)}</td>
     <td>${fmt(r.first_human_open_at || r.first_open_at)}</td>
-    <td>${fmt(r.last_open_at)} <span class="muted" style="font-size:11px">${ago(r.last_open_at)}</span></td>
+    <td>${fmt(r.last_human_open_at)} <span class="muted" style="font-size:11px">${ago(r.last_human_open_at)}</span></td>
     <td title="总命中 ${r.open_count || 0} 次">${r.human_open_count || 0}</td>
     <td>
       <div class="actions">
