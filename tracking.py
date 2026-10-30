@@ -730,6 +730,67 @@ def handle(handler, method: str) -> bool:
         )
         return True
 
+    if path.rstrip("/").startswith("/api/wa"):
+        if not authorized(handler.headers, query):
+            _send(handler, 401, b'{"error":"unauthorized"}', "application/json")
+            return True
+        import whatsapp as _wa
+
+        base = path.rstrip("/")
+        if base.endswith("/sync"):
+            try:
+                res = _wa.sync()
+            except Exception as exc:
+                res = {"ok": False, "error": str(exc)}
+            _send(
+                handler,
+                200,
+                json.dumps(res, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+            )
+            return True
+
+        if base.endswith("/action"):
+            try:
+                length = int(handler.headers.get("content-length", 0) or 0)
+                payload = json.loads(handler.rfile.read(length) or b"{}")
+            except Exception:
+                payload = {}
+            ok = _wa.act(payload.get("jid", ""), payload.get("action", ""))
+            _send(
+                handler,
+                200 if ok else 400,
+                json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+            )
+            return True
+
+        items = _wa.list_items()
+        now_iso = _now()
+        summary = {
+            "total": len(items),
+            "active": sum(1 for i in items if i["status"] == "active"),
+            "due": sum(
+                1
+                for i in items
+                if i["status"] == "active" and i.get("due_at") and i["due_at"] <= now_iso
+            ),
+            "paused": sum(1 for i in items if i["status"] == "paused"),
+            "replied": sum(1 for i in items if i["status"] == "replied"),
+            "given_up": sum(1 for i in items if i["status"] == "given_up"),
+            "configured": _wa.configured(),
+        }
+        _send(
+            handler,
+            200,
+            json.dumps(
+                {"summary": summary, "items": items, "generated_at": _now()},
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+        return True
+
     if path.rstrip("/").startswith("/api/tracking"):
         if path.rstrip("/").endswith("/register"):
             origin = handler.headers.get("origin", "")

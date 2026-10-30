@@ -99,6 +99,7 @@
     <div class="tab on" data-view="email">按邮件</div>
     <div class="tab" data-view="contact">按客户</div>
     <div class="tab" data-view="followup">待跟进</div>
+    <div class="tab" data-view="wa">WhatsApp</div>
   </div>
 
   <div id="emailView">
@@ -170,7 +171,32 @@
       </thead>
       <tbody id="rows3"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
     </table>
+  </div>  <div id="waView" style="display:none">
+    <div class="toolbar">
+      <div class="chips" style="margin:0">
+        <div class="chip on" data-wf="due">待跟进 <span id="w-due">0</span></div>
+        <div class="chip" data-wf="active">进行中 <span id="w-active">0</span></div>
+        <div class="chip" data-wf="paused">已暂停 <span id="w-paused">0</span></div>
+        <div class="chip" data-wf="closed">已结束 <span id="w-closed">0</span></div>
+      </div>
+      <button id="waSync">同步 WhatsApp</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:24%">客户</th>
+          <th style="width:10%">状态</th>
+          <th style="width:7%">我方</th>
+          <th style="width:16%">最后发送</th>
+          <th style="width:14%">最后回复</th>
+          <th style="width:13%">下次提醒</th>
+          <th style="width:16%">操作</th>
+        </tr>
+      </thead>
+      <tbody id="rows4"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+    </table>
   </div>
+
 </div>
 
 <script>
@@ -511,15 +537,98 @@ async function loadFollowups(){
     $('rows3').innerHTML = '<tr><td colspan="6" class="empty">加载失败：' + esc(err.message) + '</td></tr>';
   }
 }
+let WA = { items: [], summary: {} };
+let WF = 'due';
+
+function waBadge(it){
+  if(it.status === 'replied') return '<span class="badge b-green">已回复</span>';
+  if(it.status === 'given_up') return '<span class="badge b-gray">已放弃</span>';
+  if(it.status === 'paused') return '<span class="badge b-amber">已暂停</span>';
+  const due = it.due_at && it.due_at <= new Date().toISOString();
+  return due ? '<span class="badge b-red">该跟进</span>' : '<span class="badge b-gray">等待中</span>';
+}
+function renderWa(){
+  const s = WA.summary || {};
+  const nowIso = new Date().toISOString();
+  $('w-due').textContent = s.due || 0;
+  $('w-active').textContent = s.active || 0;
+  $('w-paused').textContent = s.paused || 0;
+  $('w-closed').textContent = (s.replied || 0) + (s.given_up || 0);
+
+  const items = (WA.items || []).filter(it=>{
+    if(WF === 'due') return it.status === 'active' && it.due_at && it.due_at <= nowIso;
+    if(WF === 'active') return it.status === 'active';
+    if(WF === 'paused') return it.status === 'paused';
+    return it.status === 'replied' || it.status === 'given_up';
+  });
+  if(!items.length){
+    const hint = (WA.summary && WA.summary.configured === false)
+      ? 'Evolution API 未配置（缺少 EVOLUTION_BASE_URL / EVOLUTION_API_KEY）'
+      : '没有符合条件的会话';
+    $('rows4').innerHTML = `<tr><td colspan="7" class="empty">${esc(hint)}</td></tr>`;
+    return;
+  }
+  $('rows4').innerHTML = items.map((it,i)=>`
+    <tr class="row" data-w="${i}">
+      <td>
+        <div class="email">${esc(it.display || it.jid)}</div>
+        ${it.last_text ? `<div class="subject" title="${esc(it.last_text)}">${esc(it.last_text)}</div>` : ''}
+        ${it.overdue_days ? `<div class="muted" style="font-size:11px">逾期 ${it.overdue_days} 天</div>` : ''}
+      </td>
+      <td>${waBadge(it)}</td>
+      <td>${it.out_since || 0}</td>
+      <td>${fmt(it.last_outbound_at)}<div class="muted" style="font-size:11px">${it.days_since_out != null ? it.days_since_out + ' 天前' : ''}</div></td>
+      <td>${fmt(it.replied_at)}</td>
+      <td>${it.status === 'active' ? fmt(it.due_at) : '<span class="muted">—</span>'}</td>
+      <td>
+        <div class="actions">
+          <button data-wa="snooze" data-j="${esc(it.jid)}">已跟进</button>
+          ${it.status === 'paused'
+            ? `<button data-wa="resume" data-j="${esc(it.jid)}">恢复</button>`
+            : `<button data-wa="pause" data-j="${esc(it.jid)}">暂停</button>`}
+          <button data-wa="replied" data-j="${esc(it.jid)}">已回复</button>
+          <button data-wa="give_up" data-j="${esc(it.jid)}">放弃</button>
+        </div>
+      </td>
+    </tr>`).join('');
+
+  document.querySelectorAll('button[data-wa]').forEach(btn=>{
+    btn.addEventListener('click', async (e)=>{
+      e.stopPropagation();
+      btn.disabled = true;
+      try{
+        const res = await fetch('/api/wa/action', {
+          method:'POST', credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({jid: btn.dataset.j, action: btn.dataset.wa})
+        });
+        if(res.ok){ await loadWa(); } else { btn.disabled = false; btn.textContent = '失败'; }
+      }catch(err){ btn.disabled = false; }
+    });
+  });
+}
+async function loadWa(){
+  $('rows4').innerHTML = '<tr><td colspan="7" class="empty">加载中…</td></tr>';
+  try{
+    const res = await fetch('/api/wa', {credentials:'same-origin'});
+    if(res.status === 401){ location.href = '/tracking'; return; }
+    WA = await res.json();
+    renderWa();
+  }catch(err){
+    $('rows4').innerHTML = '<tr><td colspan="7" class="empty">加载失败：' + esc(err.message) + '</td></tr>';
+  }
+}
 function switchView(v){
   VIEW = v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on', t.dataset.view===v));
   $('emailView').style.display = v==='email' ? '' : 'none';
   $('contactView').style.display = v==='contact' ? '' : 'none';
   $('followupView').style.display = v==='followup' ? '' : 'none';
+  $('waView').style.display = v==='wa' ? '' : 'none';
   if(v==='email') renderEmails();
   else if(v==='contact') renderContacts();
-  else loadFollowups();
+  else if(v==='followup') loadFollowups();
+  else loadWa();
 }
 async function load(){
   $('sub').textContent = '加载中…';
@@ -573,6 +682,31 @@ if(digestBtn){
       alert('推送失败：' + err.message);
     }
     digestBtn.disabled = false;
+  });
+}
+document.querySelectorAll('.chip[data-wf]').forEach(c=>{
+  c.addEventListener('click', ()=>{
+    document.querySelectorAll('.chip[data-wf]').forEach(x=>x.classList.remove('on'));
+    c.classList.add('on');
+    WF = c.dataset.wf;
+    renderWa();
+  });
+});
+const waSyncBtn = $('waSync');
+if(waSyncBtn){
+  waSyncBtn.addEventListener('click', async ()=>{
+    waSyncBtn.disabled = true;
+    waSyncBtn.textContent = '同步中…';
+    try{
+      const res = await fetch('/api/wa/sync', {method:'POST', credentials:'same-origin'});
+      const j = await res.json().catch(()=>({}));
+      if(j.ok === false){ alert('同步失败：' + (j.error || j.reason || '未知错误')); }
+      await loadWa();
+    }catch(err){
+      alert('同步失败：' + err.message);
+    }
+    waSyncBtn.disabled = false;
+    waSyncBtn.textContent = '同步 WhatsApp';
   });
 }
 load();

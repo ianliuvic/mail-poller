@@ -44,6 +44,7 @@ import hongxiu_rag
 import zoho_contacts
 import tracking
 import followups
+import whatsapp
 
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
@@ -1033,20 +1034,32 @@ def run_followup_digest(force=False):
         log("followups expire failed:", e)
 
     items = followups.due_items()
-    if not items:
+    try:
+        wa_items = whatsapp.due_items()
+    except Exception as e:
+        log("whatsapp due failed:", e)
+        wa_items = []
+
+    if not items and not wa_items:
         log("followups: nothing due today")
-        return {"due": 0}
+        return {"due": 0, "wa_due": 0}
     if not force and not (FEISHU_APP_ID and FEISHU_APP_SECRET and RECEIVE_ID):
         log("followups: feishu not configured, digest skipped")
-        return {"due": len(items)}
-    text = followups.build_digest(items)
+        return {"due": len(items), "wa_due": len(wa_items)}
+
+    parts = []
+    if items:
+        parts.append(followups.build_digest(items))
+    if wa_items:
+        parts.append(whatsapp.build_digest(wa_items))
+    text = "\n\n".join(parts)
     try:
         feishu_send(text)
     except Exception as e:
         log("followups: feishu send failed:", e)
-        return {"due": len(items), "error": str(e)}
-    log(f"followups: digest sent for {len(items)} customer(s)")
-    return {"due": len(items)}
+        return {"due": len(items), "wa_due": len(wa_items), "error": str(e)}
+    log(f"followups: digest sent (email={len(items)}, whatsapp={len(wa_items)})")
+    return {"due": len(items), "wa_due": len(wa_items)}
 
 
 def followup_loop():
@@ -1060,6 +1073,24 @@ def followup_loop():
         except Exception as e:
             log("followups loop error:", e)
             time.sleep(1800)
+
+
+# ---------- WhatsApp sync ----------
+
+WA_SYNC_INTERVAL = int(os.environ.get("WA_SYNC_INTERVAL_SECONDS", "900"))
+
+
+def wa_sync_loop():
+    while True:
+        try:
+            if whatsapp.configured():
+                res = whatsapp.sync()
+                log(f"whatsapp sync: {res}")
+            else:
+                log("whatsapp sync: evolution not configured, skip")
+        except Exception as e:
+            log("whatsapp sync error:", e)
+        time.sleep(max(120, WA_SYNC_INTERVAL))
 
 
 # ---------- knowledge pack (reply-draft context) ----------
@@ -1586,6 +1617,7 @@ if __name__ == "__main__":
     validate_rag_config()
     tracking.init_db()
     followups.init_db()
+    whatsapp.init_db()
     try:
         seeded = followups.backfill_from_tracking()
         if seeded:
@@ -1603,4 +1635,5 @@ if __name__ == "__main__":
     threading.Thread(target=contacts_sync_loop, daemon=True).start()
     threading.Thread(target=weekly_report_loop, daemon=True).start()
     threading.Thread(target=followup_loop, daemon=True).start()
+    threading.Thread(target=wa_sync_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", PORT), Health).serve_forever()
