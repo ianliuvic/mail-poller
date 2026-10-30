@@ -210,6 +210,8 @@ def act(recipient: str, action: str) -> bool:
                 "UPDATE followups SET status = ?, replied_at = ?, next_due_at = NULL, updated_at = ? WHERE recipient = ?",
                 (STATUS_REPLIED, _iso(now), _iso(now), recipient),
             )
+        elif action == "delete":
+            conn.execute("DELETE FROM followups WHERE recipient = ?", (recipient,))
         else:
             return False
     return True
