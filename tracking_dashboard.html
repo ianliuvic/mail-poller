@@ -39,6 +39,10 @@
   th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);
         font-size:13px;vertical-align:top}
   th{background:#fafbfc;color:var(--muted);font-weight:600;font-size:12px}
+  th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+  th.sortable:hover{color:#1f2328}
+  th .arrow{opacity:.45;font-size:10px;margin-left:3px}
+  th.sorted .arrow{opacity:1;color:#1a73e8}
   tr.row{cursor:pointer}
   tr.row:hover{background:#fafbfc}
   tr.row.child td{background:#fafcff}
@@ -113,14 +117,14 @@
       <input type="search" id="q" placeholder="搜索收件人或主题…">
       <button id="refresh">刷新</button>
     </div>
-    <table>
+    <table id="emailTable">
       <thead>
         <tr>
-          <th style="width:30%">收件人 / 主题</th>
-          <th style="width:12%">状态</th>
-          <th style="width:15%">首次打开</th>
-          <th style="width:15%">最近打开</th>
-          <th style="width:8%">真人次数</th>
+          <th class="sortable" data-sort="recipient" style="width:30%">收件人 / 主题<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="status" style="width:12%">状态<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="first" style="width:15%">首次打开<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="last" style="width:15%">最近打开<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="human" style="width:8%">真人次数<span class="arrow">↕</span></th>
           <th style="width:20%">操作</th>
         </tr>
       </thead>
@@ -157,15 +161,15 @@
       </div>
       <button id="sendDigest" title="立即推送一次飞书提醒（测试用）">立即提醒</button>
     </div>
-    <table>
+    <table id="fuTable">
       <thead>
         <tr>
-          <th style="width:24%">客户</th>
-          <th style="width:10%">打开</th>
-          <th style="width:10%">状态</th>
-          <th style="width:7%">已发</th>
-          <th style="width:16%">最后发送</th>
-          <th style="width:15%">下次提醒</th>
+          <th class="sortable" data-sort="recipient" style="width:24%">客户<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="opened" style="width:10%">打开<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="status" style="width:10%">状态<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="attempts" style="width:7%">已发<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="last" style="width:16%">最后发送<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="next" style="width:15%">下次提醒<span class="arrow">↕</span></th>
           <th style="width:18%">操作</th>
         </tr>
       </thead>
@@ -181,15 +185,15 @@
       </div>
       <button id="waSync">同步 WhatsApp</button>
     </div>
-    <table>
+    <table id="waTable">
       <thead>
         <tr>
-          <th style="width:24%">客户</th>
-          <th style="width:10%">状态</th>
-          <th style="width:7%">我方</th>
-          <th style="width:16%">最后发送</th>
-          <th style="width:14%">最后回复</th>
-          <th style="width:13%">下次提醒</th>
+          <th class="sortable" data-sort="recipient" style="width:24%">客户<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="status" style="width:10%">状态<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="out" style="width:7%">我方<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="last" style="width:16%">最后发送<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="reply" style="width:14%">最后回复<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="next" style="width:13%">下次提醒<span class="arrow">↕</span></th>
           <th style="width:16%">操作</th>
         </tr>
       </thead>
@@ -351,6 +355,56 @@ function groupHeaderHtml(g, gi){
     </td>
   </tr>`;
 }
+const SORT = {
+  email: { key: '', dir: 1 },
+  followup: { key: '', dir: 1 },
+  wa: { key: '', dir: 1 }
+};
+
+function fuRank(it){
+  if(it.status === 'active') return (it.due_at && it.due_at <= new Date().toISOString()) ? 0 : 1;
+  if(it.status === 'paused') return 2;
+  if(it.status === 'replied') return 3;
+  return 4;
+}
+function emailRank(r){
+  if(r.first_human_open_at) return 0;
+  if(r.manual_read_at) return 1;
+  if(r.first_open_at) return 2;
+  if(r.bot_count) return 3;
+  return 4;
+}
+function applySort(list, state, getters){
+  if(!state.key || !getters[state.key]) return list;
+  const get = getters[state.key];
+  return [...list].sort((a,b)=>{
+    const va = get(a), vb = get(b);
+    if(va == null && vb == null) return 0;
+    if(va == null) return 1;
+    if(vb == null) return -1;
+    if(va > vb) return state.dir;
+    if(va < vb) return -state.dir;
+    return 0;
+  });
+}
+function bindSort(tableId, stateName, rerender){
+  document.querySelectorAll(`#${tableId} th.sortable`).forEach(th=>{
+    th.addEventListener('click', ()=>{
+      const st = SORT[stateName];
+      const key = th.dataset.sort;
+      if(st.key === key) st.dir = -st.dir;
+      else { st.key = key; st.dir = 1; }
+      document.querySelectorAll(`#${tableId} th.sortable`).forEach(x=>{
+        const on = x.dataset.sort === st.key;
+        x.classList.toggle('sorted', on);
+        const arrow = x.querySelector('.arrow');
+        if(arrow) arrow.textContent = on ? (st.dir === 1 ? '▲' : '▼') : '↕';
+      });
+      rerender();
+    });
+  });
+}
+
 function renderEmails(){
   const rows = DATA.rows.filter(matches);
   if(!rows.length){
@@ -358,9 +412,16 @@ function renderEmails(){
     return;
   }
   const groups = buildGroups(rows);
+  const sortedGroups = applySort(groups, SORT.email, {
+    recipient: g => (g.recipient || '').toLowerCase(),
+    status: g => Math.min.apply(null, g.items.map(emailRank)),
+    first: g => g.firstHuman || '',
+    last: g => g.lastOpen || '',
+    human: g => g.human
+  });
   let html = '';
   let uid = 0;
-  groups.forEach((g, gi)=>{
+  sortedGroups.forEach((g, gi)=>{
     if(g.items.length === 1){
       html += emailRowHtml(g.items[0], uid++, false, gi);
       return;
@@ -470,23 +531,32 @@ function renderFollowups(){
   $('c-paused').textContent = s.paused || 0;
   $('c-closed').textContent = (s.replied || 0) + (s.given_up || 0);
 
-  const items = (FU.items || []).filter(it=>{
+  const baseItems = (FU.items || []).filter(it=>{
     if(FF === 'due') return it.status === 'active' && it.next_due_at && it.next_due_at <= nowIso;
     if(FF === 'active') return it.status === 'active';
     if(FF === 'paused') return it.status === 'paused';
     return it.status === 'replied' || it.status === 'given_up';
-  }).sort((a,b)=>{
-    if(FF !== 'due' && FF !== 'active') return 0;
-    if(!!b.opened !== !!a.opened) return b.opened ? 1 : -1;
-    return String(a.next_due_at||'').localeCompare(String(b.next_due_at||''));
   });
+  const items = SORT.followup.key
+    ? applySort(baseItems, SORT.followup, {
+        recipient: it => (it.recipient || '').toLowerCase(),
+        opened: it => it.human_opens ? 1 : 0,
+        status: it => fuRank(it),
+        attempts: it => it.attempts || 0,
+        last: it => it.last_outbound_at || '',
+        next: it => it.due_at || ''
+      })
+    : baseItems.sort((a,b)=>{
+        if(FF !== 'due' && FF !== 'active') return 0;
+        if(!!b.opened !== !!a.opened) return b.opened ? 1 : -1;
+        return String(a.next_due_at||'').localeCompare(String(b.next_due_at||''));
+      });
   if(!items.length){
     $('rows3').innerHTML = '<tr><td colspan="7" class="empty">没有符合条件的客户</td></tr>';
     return;
   }
   $('rows3').innerHTML = items.map((it,i)=>`
-    <tr class="row" data-f="${i}">
-      <td>
+    <tr class="row" data-f="${i}">      <td>
         <div class="email">${it.opened ? '🔥 ' : ''}${esc(it.recipient)}</div>
         ${it.last_subject ? `<div class="subject" title="${esc(it.last_subject)}">${esc(it.last_subject)}</div>` : ''}
         ${it.overdue_days ? `<div class="muted" style="font-size:11px">逾期 ${it.overdue_days} 天</div>` : ''}
@@ -555,12 +625,22 @@ function renderWa(){
   $('w-paused').textContent = s.paused || 0;
   $('w-closed').textContent = (s.replied || 0) + (s.given_up || 0);
 
-  const items = (WA.items || []).filter(it=>{
+  const waBase = (WA.items || []).filter(it=>{
     if(WF === 'due') return it.status === 'active' && it.due_at && it.due_at <= nowIso;
     if(WF === 'active') return it.status === 'active';
     if(WF === 'paused') return it.status === 'paused';
     return it.status === 'replied' || it.status === 'given_up';
   });
+  const items = SORT.wa.key
+    ? applySort(waBase, SORT.wa, {
+        recipient: it => (it.display || it.jid || '').toLowerCase(),
+        status: it => fuRank(it),
+        out: it => it.out_since || 0,
+        last: it => it.last_outbound_at || '',
+        reply: it => it.replied_at || '',
+        next: it => it.due_at || ''
+      })
+    : waBase;
   if(!items.length){
     const hint = (WA.summary && WA.summary.configured === false)
       ? 'Evolution API 未配置（缺少 EVOLUTION_BASE_URL / EVOLUTION_API_KEY）'
@@ -709,6 +789,9 @@ if(waSyncBtn){
     waSyncBtn.textContent = '同步 WhatsApp';
   });
 }
+bindSort('emailTable', 'email', renderEmails);
+bindSort('fuTable', 'followup', renderFollowups);
+bindSort('waTable', 'wa', renderWa);
 load();
 </script>
 </body>
