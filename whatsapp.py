@@ -27,6 +27,7 @@ BASE_URL = os.environ.get("EVOLUTION_BASE_URL", "").rstrip("/")
 API_KEY = os.environ.get("EVOLUTION_API_KEY", "")
 INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "WA: +86 17711014152")
 SYNC_DAYS = int(os.environ.get("WA_SYNC_DAYS", "7"))
+OWN_JID = os.environ.get("WA_OWN_JID", "8617711014152@s.whatsapp.net")
 
 STATUS_ACTIVE = "active"
 STATUS_REPLIED = "replied"
@@ -105,6 +106,11 @@ def init_db():
                 snooze_until TEXT,
                 updated_at   TEXT
             );
+            CREATE TABLE IF NOT EXISTS wa_aliases (
+                alias     TEXT PRIMARY KEY,
+                canonical TEXT NOT NULL,
+                updated_at TEXT
+            );
             """
         )
 
@@ -171,6 +177,7 @@ def fetch_messages(days: int = None):
 def _skip_jid(jid: str) -> bool:
     return (
         not jid
+        or jid == OWN_JID
         or jid.endswith("@g.us")
         or jid.endswith("@broadcast")
         or jid.startswith("status@")
@@ -178,14 +185,40 @@ def _skip_jid(jid: str) -> bool:
     )
 
 
-def _store(records):
+def _load_aliases():
+    with _connect() as conn:
+        return {r["alias"]: r["canonical"] for r in conn.execute("SELECT alias, canonical FROM wa_aliases")}
+
+
+def _canonical(jid, alt, aliases):
+    """WhatsApp 现在按 LID 投递消息，同一个人的 LID 和手机号 JID 要合并成一条。"""
+    if jid and jid.endswith("@lid"):
+        mapped = aliases.get(jid)
+        if mapped:
+            return mapped
+        if alt and alt.endswith("@s.whatsapp.net"):
+            return alt
+    return jid
+
+
+def _store(records, aliases):
     touched = set()
     with _connect() as conn:
         for rec in records:
             key = rec.get("key") or {}
-            jid = key.get("remoteJid") or ""
-            if _skip_jid(jid):
+            raw_jid = key.get("remoteJid") or ""
+            if _skip_jid(raw_jid):
                 continue
+            alt = key.get("remoteJidAlt") or ""
+            canonical = _canonical(raw_jid, alt, aliases)
+            if canonical != raw_jid and raw_jid.endswith("@lid") and canonical.endswith("@s.whatsapp.net"):
+                conn.execute(
+                    """INSERT INTO wa_aliases (alias, canonical, updated_at) VALUES (?,?,?)
+                       ON CONFLICT(alias) DO UPDATE SET canonical = excluded.canonical,
+                                                        updated_at = excluded.updated_at""",
+                    (raw_jid, canonical, _iso(_now())),
+                )
+                aliases[raw_jid] = canonical
             mid = key.get("id") or rec.get("id")
             ts = int(rec.get("messageTimestamp") or 0)
             mtype = rec.get("messageType") or ""
@@ -197,7 +230,7 @@ def _store(records):
                    ON CONFLICT(id) DO NOTHING""",
                 (
                     mid,
-                    jid,
+                    canonical,
                     1 if key.get("fromMe") else 0,
                     ts,
                     mtype,
@@ -205,7 +238,40 @@ def _store(records):
                     rec.get("pushName") or "",
                 ),
             )
-            touched.add(jid)
+            touched.add(canonical)
+    return touched
+
+
+def _apply_aliases(aliases):
+    """Re-point already stored rows at their canonical jid."""
+    touched = set()
+    if not aliases:
+        return touched
+    with _connect() as conn:
+        for alias, canonical in aliases.items():
+            if alias == canonical:
+                continue
+            rows = conn.execute(
+                "SELECT DISTINCT jid FROM wa_messages WHERE jid = ?", (alias,)
+            ).fetchall()
+            if not rows:
+                continue
+            conn.execute("UPDATE wa_messages SET jid = ? WHERE jid = ?", (canonical, alias))
+            touched.add(canonical)
+            # 覆盖状态一并迁移
+            ov = conn.execute("SELECT * FROM wa_overrides WHERE jid = ?", (alias,)).fetchone()
+            if ov:
+                conn.execute(
+                    """INSERT INTO wa_overrides (jid, status, snooze_until, updated_at)
+                       VALUES (?,?,?,?)
+                       ON CONFLICT(jid) DO UPDATE SET
+                         status = COALESCE(NULLIF(excluded.status,''), wa_overrides.status),
+                         snooze_until = COALESCE(excluded.snooze_until, wa_overrides.snooze_until),
+                         updated_at = excluded.updated_at""",
+                    (canonical, ov["status"], ov["snooze_until"], _iso(_now())),
+                )
+                conn.execute("DELETE FROM wa_overrides WHERE jid = ?", (alias,))
+            conn.execute("DELETE FROM wa_contacts WHERE jid = ?", (alias,))
     return touched
 
 
@@ -278,12 +344,22 @@ def _purge_non_chat():
     return jids
 
 
+def _purge_own():
+    with _connect() as conn:
+        conn.execute("DELETE FROM wa_messages WHERE jid = ?", (OWN_JID,))
+        conn.execute("DELETE FROM wa_contacts WHERE jid = ?", (OWN_JID,))
+        conn.execute("DELETE FROM wa_overrides WHERE jid = ?", (OWN_JID,))
+
+
 def sync(days: int = None) -> dict:
     if not configured():
         return {"ok": False, "reason": "evolution not configured"}
+    _purge_own()
     purged = _purge_non_chat()
+    aliases = _load_aliases()
     records = fetch_messages(days)
-    touched = _store(records)
+    touched = _store(records, aliases)
+    touched |= _apply_aliases(aliases)
     for jid in set(touched) | set(purged):
         _recompute(jid)
     return {"ok": True, "messages": len(records), "chats": len(touched)}
