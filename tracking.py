@@ -507,8 +507,8 @@ def register(
             import followups as _followups
 
             _followups.note_outbound(email, subject)
-        except Exception:
-            pass
+        except Exception as exc:  # 不要静默失败，否则只能等对账补
+            print("followups note_outbound failed:", exc, flush=True)
 
     return True
 

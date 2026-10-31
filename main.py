@@ -1093,6 +1093,18 @@ def wa_sync_loop():
         time.sleep(max(120, WA_SYNC_INTERVAL))
 
 
+def followup_reconcile_loop():
+    """Keep follow-up cycles in sync with tracked emails, every few minutes."""
+    while True:
+        try:
+            fixed = followups.reconcile_with_tracking()
+            if fixed:
+                log(f"followups: reconciled {fixed} outbound email(s)")
+        except Exception as e:
+            log("followups reconcile error:", e)
+        time.sleep(300)
+
+
 # ---------- knowledge pack (reply-draft context) ----------
 
 KNOWLEDGE_DIR = os.environ.get("KNOWLEDGE_DIR", "/data/knowledge")
@@ -1636,4 +1648,5 @@ if __name__ == "__main__":
     threading.Thread(target=weekly_report_loop, daemon=True).start()
     threading.Thread(target=followup_loop, daemon=True).start()
     threading.Thread(target=wa_sync_loop, daemon=True).start()
+    threading.Thread(target=followup_reconcile_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", PORT), Health).serve_forever()
