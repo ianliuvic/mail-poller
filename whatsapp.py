@@ -211,6 +211,8 @@ def _store(records, aliases):
                 continue
             alt = key.get("remoteJidAlt") or ""
             canonical = _canonical(raw_jid, alt, aliases)
+            if _skip_jid(canonical):
+                continue
             if canonical != raw_jid and raw_jid.endswith("@lid") and canonical.endswith("@s.whatsapp.net"):
                 conn.execute(
                     """INSERT INTO wa_aliases (alias, canonical, updated_at) VALUES (?,?,?)
