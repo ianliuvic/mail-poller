@@ -120,15 +120,16 @@
     <table id="emailTable">
       <thead>
         <tr>
-          <th class="sortable" data-sort="recipient" style="width:30%">收件人 / 主题<span class="arrow">↕</span></th>
-          <th class="sortable" data-sort="status" style="width:12%">状态<span class="arrow">↕</span></th>
-          <th class="sortable" data-sort="first" style="width:15%">首次打开<span class="arrow">↕</span></th>
-          <th class="sortable" data-sort="last" style="width:15%">最近打开<span class="arrow">↕</span></th>
-          <th class="sortable" data-sort="human" style="width:8%">真人次数<span class="arrow">↕</span></th>
-          <th style="width:20%">操作</th>
+          <th class="sortable" data-sort="recipient" style="width:26%">收件人 / 主题<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="status" style="width:11%">状态<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="sent" style="width:13%">发送时间<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="first" style="width:13%">首次打开<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="last" style="width:13%">最近打开<span class="arrow">↕</span></th>
+          <th class="sortable" data-sort="human" style="width:7%">真人次数<span class="arrow">↕</span></th>
+          <th style="width:17%">操作</th>
         </tr>
       </thead>
-      <tbody id="rows"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
     </table>
   </div>
 
@@ -296,6 +297,7 @@ function emailRowHtml(r, uid, child, gi, seq){
       ${r.subject ? `<div class="subject" title="${esc(r.subject)}">${esc(r.subject)}</div>` : ''}
     </td>
     <td>${statusBadge(r)}</td>
+    <td>${fmt(r.created_at)} <span class="muted" style="font-size:11px">${ago(r.created_at)}</span></td>
     <td>${fmt(r.first_human_open_at || r.manual_read_at)}</td>
     <td>${fmt(r.last_human_open_at)} <span class="muted" style="font-size:11px">${ago(r.last_human_open_at)}</span></td>
     <td title="总命中 ${r.open_count || 0} 次">${r.human_open_count || 0}</td>
@@ -307,7 +309,7 @@ function emailRowHtml(r, uid, child, gi, seq){
       </div>
     </td>
   </tr>
-  <tr class="events" id="ev-${uid}" style="display:none"><td colspan="6">
+  <tr class="events" id="ev-${uid}" style="display:none"><td colspan="7">
     <div class="pix"><span class="muted">像素</span><code title="${esc(pix)}">${esc(pix)}</code></div>
     ${(r.events||[]).map(e=>`
       <div class="ev">
@@ -343,6 +345,7 @@ function groupHeaderHtml(g, gi){
       <div class="subject" title="${esc(g.rootSubject || '')}">${esc(g.rootSubject || '—')}</div>
     </td>
     <td>${badge}${ratio}</td>
+    <td>${fmt(latest.created_at)} <span class="muted" style="font-size:11px">${ago(latest.created_at)}</span></td>
     <td>${fmt(g.firstHuman)}</td>
     <td>${fmt(g.lastOpen)} <span class="muted" style="font-size:11px">${ago(g.lastOpen)}</span></td>
     <td>${g.human}</td>
@@ -408,13 +411,14 @@ function bindSort(tableId, stateName, rerender){
 function renderEmails(){
   const rows = DATA.rows.filter(matches);
   if(!rows.length){
-    $('rows').innerHTML = '<tr><td colspan="6" class="empty">没有符合条件的邮件</td></tr>';
+    $('rows').innerHTML = '<tr><td colspan="7" class="empty">没有符合条件的邮件</td></tr>';
     return;
   }
   const groups = buildGroups(rows);
   const sortedGroups = applySort(groups, SORT.email, {
     recipient: g => (g.recipient || '').toLowerCase(),
     status: g => Math.min.apply(null, g.items.map(emailRank)),
+    sent: g => g.items[0].created_at || '',
     first: g => g.firstHuman || '',
     last: g => g.lastOpen || '',
     human: g => g.human
@@ -597,14 +601,14 @@ function renderFollowups(){
   });
 }
 async function loadFollowups(){
-  $('rows3').innerHTML = '<tr><td colspan="6" class="empty">加载中…</td></tr>';
+  $('rows3').innerHTML = '<tr><td colspan="7" class="empty">加载中…</td></tr>';
   try{
     const res = await fetch('/api/followups', {credentials:'same-origin'});
     if(res.status === 401){ location.href = '/tracking'; return; }
     FU = await res.json();
     renderFollowups();
   }catch(err){
-    $('rows3').innerHTML = '<tr><td colspan="6" class="empty">加载失败：' + esc(err.message) + '</td></tr>';
+    $('rows3').innerHTML = '<tr><td colspan="7" class="empty">加载失败：' + esc(err.message) + '</td></tr>';
   }
 }
 let WA = { items: [], summary: {} };
