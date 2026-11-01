@@ -146,10 +146,11 @@
           <th style="width:10%">已打开</th>
           <th style="width:10%">真人次数</th>
           <th style="width:18%">首次真人打开</th>
-          <th style="width:24%">最近主题</th>
+          <th style="width:20%">最近主题</th>
+          <th style="width:10%">操作</th>
         </tr>
       </thead>
-      <tbody id="rows2"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+      <tbody id="rows2"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
     </table>
   </div>
 
@@ -308,6 +309,7 @@ function emailRowHtml(r, uid, child, gi, seq){
         <a href="${zohoLink(r)}" target="_blank" rel="noopener">在 Zoho 中查看</a>
         <button data-copy="${esc(pix)}">复制像素</button>
         <button data-mark="${esc(r.token)}" data-clear="${r.manual_read_at ? 1 : 0}">${r.manual_read_at ? '取消人工标记' : '标记已读'}</button>
+        <button data-del="token" data-v="${esc(r.token)}">删除</button>
       </div>
     </td>
   </tr>
@@ -356,6 +358,7 @@ function groupHeaderHtml(g, gi){
         <button data-toggle="${gi}">展开 ${g.count} 封</button>
         <a href="${zohoLink(latest)}" target="_blank" rel="noopener">在 Zoho 中查看</a>
         <button data-mark="${esc(latest.token)}" data-clear="${latest.manual_read_at ? 1 : 0}">${latest.manual_read_at ? '取消人工标记' : '标记最新一封已读'}</button>
+        <button data-del="thread" data-v="${esc(latest.token)}">删除整组</button>
       </div>
     </td>
   </tr>`;
@@ -406,6 +409,35 @@ function bindSort(tableId, stateName, rerender){
         if(arrow) arrow.textContent = on ? (st.dir === 1 ? '▲' : '▼') : '↕';
       });
       rerender();
+    });
+  });
+}
+
+function bindDelete(){
+  document.querySelectorAll('button[data-del]').forEach(btn=>{
+    btn.addEventListener('click', async (e)=>{
+      e.stopPropagation();
+      const mode = btn.dataset.del;
+      const value = btn.dataset.v;
+      const label = mode === 'thread'
+        ? '这一整组邮件'
+        : mode === 'recipient'
+          ? `与 ${value} 的全部邮件`
+          : '这一封邮件';
+      if(!confirm(`从面板中删除${label}？\n\n只删除追踪记录与统计，不会动 Zoho 里的邮件。`)) return;
+      btn.disabled = true;
+      try{
+        const res = await fetch('/api/tracking/delete', {
+          method:'POST', credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({value, mode})
+        });
+        if(res.ok){ await load(); }
+        else { btn.disabled = false; alert('删除失败'); }
+      }catch(err){
+        btn.disabled = false;
+        alert('删除失败：' + err.message);
+      }
     });
   });
 }
@@ -492,11 +524,12 @@ function renderEmails(){
       }
     });
   });
+  bindDelete();
 }
 function renderContacts(){
   const rows = DATA.contacts.filter(c=>!QUERY2 || (c.recipient||'').toLowerCase().includes(QUERY2));
   if(!rows.length){
-    $('rows2').innerHTML = '<tr><td colspan="6" class="empty">没有客户记录</td></tr>';
+    $('rows2').innerHTML = '<tr><td colspan="7" class="empty">没有客户记录</td></tr>';
     return;
   }
   $('rows2').innerHTML = rows.map((c,i)=>`
@@ -507,10 +540,12 @@ function renderContacts(){
       <td>${c.human_opens}</td>
       <td>${fmt(c.first_human_open_at)}</td>
       <td class="subject" title="${esc(c.last_subject||'')}">${esc(c.last_subject||'—')}</td>
+      <td><button data-del="recipient" data-v="${esc(c.recipient)}">删除客户</button></td>
     </tr>`).join('');
 
   document.querySelectorAll('#rows2 tr.row').forEach(tr=>{
-    tr.addEventListener('click',()=>{
+    tr.addEventListener('click',(e)=>{
+      if(e.target.closest('button')) return;
       const c = rows[tr.dataset.c];
       QUERY = (c.recipient||'').toLowerCase();
       $('q').value = QUERY;
@@ -518,6 +553,7 @@ function renderContacts(){
       renderEmails();
     });
   });
+  bindDelete();
 }
 let FU = { items: [], summary: {} };
 let FF = 'due';

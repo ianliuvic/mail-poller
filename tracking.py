@@ -513,6 +513,58 @@ def register(
     return True
 
 
+def delete_tracking(value: str, mode: str) -> int:
+    """Remove tracked mail by token / thread / recipient."""
+    value = (value or "").strip()
+    if not value:
+        return 0
+    with _connect() as conn:
+        if mode == "token":
+            rows = conn.execute(
+                "SELECT token FROM tracking WHERE token = ?", (value,)
+            ).fetchall()
+            tokens = [r["token"] for r in rows]
+
+        elif mode == "thread":
+            row = conn.execute(
+                "SELECT thread_key, recipient, subject FROM tracking WHERE token = ?",
+                (value,),
+            ).fetchone()
+            if not row:
+                return 0
+            key = row["thread_key"] or thread_key(row["recipient"] or "", row["subject"] or "")
+            siblings = conn.execute(
+                "SELECT token, recipient, subject, thread_key FROM tracking WHERE lower(recipient) = lower(?)",
+                (row["recipient"] or "",),
+            ).fetchall()
+            tokens = [
+                s["token"]
+                for s in siblings
+                if (s["thread_key"] or thread_key(s["recipient"] or "", s["subject"] or "")) == key
+            ]
+
+        elif mode == "recipient":
+            rows = conn.execute(
+                "SELECT token FROM tracking WHERE lower(recipient) = lower(?)", (value,)
+            ).fetchall()
+            tokens = [r["token"] for r in rows]
+
+        else:
+            return 0
+
+        for token in tokens:
+            conn.execute("DELETE FROM tracking_events WHERE token = ?", (token,))
+            conn.execute("DELETE FROM tracking WHERE token = ?", (token,))
+
+        if mode == "recipient":
+            try:
+                conn.execute("DELETE FROM followups WHERE recipient = ?", (value.lower(),))
+            except sqlite3.Error:
+                pass
+
+        return len(tokens)
+
+
 def mark_read(token: str, clear: bool = False) -> bool:
     """Manually mark an email as read (e.g. the buyer confirmed via WhatsApp)."""
     token = (token or "").strip()
@@ -833,6 +885,20 @@ def handle(handler, method: str) -> bool:
             return True
         if not authorized(handler.headers, query):
             _send(handler, 401, b'{"error":"unauthorized"}', "application/json")
+            return True
+        if path.rstrip("/").endswith("/delete"):
+            try:
+                length = int(handler.headers.get("content-length", 0) or 0)
+                payload = json.loads(handler.rfile.read(length) or b"{}")
+            except Exception:
+                payload = {}
+            removed = delete_tracking(payload.get("value", ""), payload.get("mode", ""))
+            _send(
+                handler,
+                200,
+                json.dumps({"removed": removed}, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+            )
             return True
         if path.rstrip("/").endswith("/mark"):
             try:
