@@ -86,6 +86,97 @@ def html_to_text(h):
     return "".join(p.parts)
 
 
+class _ListTextExtractor(HTMLParser):
+    """HTML -> text that keeps <ul>/<ol> list markers.
+
+    Plain-text alternatives in marketing mail often drop the bullets entirely,
+    so the inquiry card uses the HTML part to keep the sender's list structure.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+        self.skip = 0
+        self.lists = []  # [("ul"|"ol", counter)]
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "blockquote":
+            self.skip += 1
+        elif tag in ("ul", "ol"):
+            self.lists.append([tag, 0])
+        elif tag == "li":
+            depth = max(0, len(self.lists) - 1)
+            marker = "• "
+            if self.lists and self.lists[-1][0] == "ol":
+                self.lists[-1][1] += 1
+                marker = f"{self.lists[-1][1]}. "
+            self.parts.append("\n" + "  " * depth + marker)
+        elif tag in ("p", "div", "br", "tr", "h1", "h2", "h3", "h4", "td", "th"):
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag == "blockquote" and self.skip > 0:
+            self.skip -= 1
+        elif tag in ("ul", "ol"):
+            if self.lists:
+                self.lists.pop()
+            self.parts.append("\n")
+        elif tag == "li":
+            self.parts.append("\n")
+        elif tag in ("p", "div", "tr", "h1", "h2", "h3", "h4"):
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if self.skip == 0:
+            self.parts.append(data.replace("\xa0", " "))
+
+
+def html_to_text_with_lists(h):
+    p = _ListTextExtractor()
+    try:
+        p.feed(h)
+    except Exception:
+        pass
+    raw = "".join(p.parts)
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw.splitlines()]
+    text = "\n".join(lines)
+    # Keep one blank line between a list and the surrounding paragraphs, but not
+    # between consecutive list items (the HTML emits several block newlines).
+    text = re.sub(
+        r"(?m)^([ \t]*(?:•|\d+[.)]) .*)\n(?:[ \t]*\n)+(?=[ \t]*(?:•|\d+[.)]) )",
+        r"\1\n",
+        text,
+    )
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def extract_html_body(msg):
+    """Return (text_from_html_with_lists, found_html). Empty text when no HTML part."""
+    parts = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() != "text/html":
+                continue
+            if "attachment" in str(part.get("Content-Disposition") or ""):
+                continue
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                parts.append(payload.decode(charset, errors="replace"))
+            except Exception:
+                parts.append(payload.decode("utf-8", errors="replace"))
+    elif msg.get_content_type() == "text/html":
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            parts.append(payload.decode(charset, errors="replace"))
+    if not parts:
+        return "", False
+    return html_to_text_with_lists("\n".join(parts)), True
+
+
 # ---------- extract plain body from an email.message ----------
 
 def extract_body(msg):

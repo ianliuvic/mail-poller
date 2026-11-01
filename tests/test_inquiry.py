@@ -5,6 +5,29 @@ import unittest
 from unittest.mock import patch
 
 import inquiry
+import mailai
+
+
+class HtmlListTests(unittest.TestCase):
+    def test_bullets_and_numbers_survive_html_to_text(self):
+        html = (
+            "<p>Intro:</p>"
+            "<ul><li>A one</li><li>A two</li></ul>"
+            "<p>Next:</p>"
+            "<ol><li>First</li><li>Second</li></ol>"
+        )
+        text = mailai.html_to_text_with_lists(html)
+        self.assertIn("• A one", text)
+        self.assertIn("• A two", text)
+        self.assertIn("1. First", text)
+        self.assertIn("2. Second", text)
+        self.assertNotIn("\n\n• A two", text)
+        self.assertNotIn("\n\n2. Second", text)
+        self.assertIn("\n\n• A one", text)
+
+    def test_blank_text_inside_bullets_is_preserved(self):
+        text = mailai.html_to_text_with_lists("<ul><li>Only</li></ul>")
+        self.assertEqual(text, "• Only")
 
 
 class InquiryCardTests(unittest.TestCase):

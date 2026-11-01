@@ -436,6 +436,7 @@ def poll_mailbox(mb):
                 from_ = decode_mime(msg.get("From"))
                 subject = decode_mime(msg.get("Subject"))
                 body, _ = mailai.extract_body(msg)
+                html_body, _ = mailai.extract_html_body(msg)
                 attachments = mailai.extract_attachments(msg)
                 date_str = ""
                 try:
@@ -448,6 +449,7 @@ def poll_mailbox(mb):
                     "from": from_,
                     "subject": subject,
                     "body": body,
+                    "html_body": html_body,
                     "attachments": attachments,
                     "date": date_str,
                     "in_reply_to": msg.get("In-Reply-To") or "",
@@ -769,7 +771,7 @@ def poll_once():
                             from_=from_,
                             email=email,
                             subject=subject,
-                            body=item.get("body", ""),
+                            body=item.get("html_body") or item.get("body", ""),
                             date=item.get("date", ""),
                         )
                     except Exception as e:
