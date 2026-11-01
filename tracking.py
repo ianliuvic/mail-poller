@@ -523,7 +523,7 @@ def delete_tracking(value: str, mode: str) -> int:
             rows = conn.execute(
                 "SELECT token FROM tracking WHERE token = ?", (value,)
             ).fetchall()
-            tokens = [r["token"] for r in rows]
+            tokens = [r[0] for r in rows]
 
         elif mode == "thread":
             row = conn.execute(
@@ -532,22 +532,22 @@ def delete_tracking(value: str, mode: str) -> int:
             ).fetchone()
             if not row:
                 return 0
-            key = row["thread_key"] or thread_key(row["recipient"] or "", row["subject"] or "")
+            key = row[0] or thread_key(row[1] or "", row[2] or "")
             siblings = conn.execute(
                 "SELECT token, recipient, subject, thread_key FROM tracking WHERE lower(recipient) = lower(?)",
-                (row["recipient"] or "",),
+                (row[1] or "",),
             ).fetchall()
             tokens = [
-                s["token"]
+                s[0]
                 for s in siblings
-                if (s["thread_key"] or thread_key(s["recipient"] or "", s["subject"] or "")) == key
+                if (s[3] or thread_key(s[1] or "", s[2] or "")) == key
             ]
 
         elif mode == "recipient":
             rows = conn.execute(
                 "SELECT token FROM tracking WHERE lower(recipient) = lower(?)", (value,)
             ).fetchall()
-            tokens = [r["token"] for r in rows]
+            tokens = [r[0] for r in rows]
 
         else:
             return 0
