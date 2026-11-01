@@ -27,7 +27,8 @@ class InquiryCardTests(unittest.TestCase):
         panels = [e["header"]["title"]["content"] for e in elements if e["tag"] == "collapsible_panel"]
         self.assertEqual(panels, ["📄 原文", "🌐 译文"])
         inner = [e["elements"][0]["tag"] for e in elements if e["tag"] == "collapsible_panel"]
-        self.assertEqual(inner, ["markdown", "markdown"])
+        self.assertEqual(inner, ["div", "div"])
+        self.assertFalse(card["config"]["wide_screen_mode"])
 
     def test_markdown_injection_is_neutralised(self):
         card = inquiry.build_card(

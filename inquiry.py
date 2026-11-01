@@ -188,42 +188,81 @@ def _panel(title, text):
         },
         "border": {"color": "grey", "corner_radius": "5px"},
         "padding": "8px 8px 8px 8px",
-        "elements": [{"tag": "markdown", "content": (text or "（空）").replace("<", "＜").replace(">", "＞")}],
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": (text or "（空）").replace("<", "＜").replace(">", "＞"),
+                },
+            }
+        ],
     }
 
 
+def _meta_lines(mailbox, from_, email, subject, date, channel):
+    sender = from_ or email or ""
+    return (
+        f"**来源**　{_md(channel, 20)} · {_md(mailbox, 60)}\n"
+        f"**时间**　{_md(date or datetime.now(BEIJING).strftime('%Y-%m-%d %H:%M'), 40)}\n"
+        f"**发件人**　{_md(sender, 100)}\n"
+        f"**主题**　{_md(subject, 140) or '（无主题）'}"
+    )
+
+
+def short_text(text):
+    """Plain text is rendered by Feishu as-is; only strip card-tag characters."""
+    return (text or "").replace("<", "＜").replace(">", "＞")
+
+
 def build_card(*, mailbox, from_, email, subject, date, summary, original, translation, inquiry_id, channel="邮件"):
-    now = datetime.now(BEIJING).strftime("%Y-%m-%d %H:%M:%S")
     elements = [
         {"tag": "markdown", "content": f"**{_md(summary, 80) or '（无摘要）'}**"},
-        {
-            "tag": "markdown",
-            "content": (
-                f"**来源**　{_md(channel, 20)} · {_md(mailbox, 60)}\n"
-                f"**时间**　{_md(date or now, 40)}\n"
-                f"**发件人**　{_md(from_, 80)}\n"
-                f"**邮箱**　{_md(email, 80)}\n"
-                f"**主题**　{_md(subject, 140)}"
-            ),
-        },
+        {"tag": "markdown", "content": _meta_lines(mailbox, from_, email, subject, date, channel)},
         {"tag": "hr"},
-        _panel("📄 原文", (original or "")[:MAX_TEXT]),
+        _panel("📄 原文", short_text(original)[:MAX_TEXT]),
     ]
     if translation and translation.strip() != (original or "").strip():
-        elements.append(_panel("🌐 译文", translation[:MAX_TEXT]))
+        elements.append(_panel("🌐 译文", short_text(translation)[:MAX_TEXT]))
     elements += [
         {"tag": "hr"},
         {"tag": "markdown", "content": f"<font color='grey'>{_md(inquiry_id, 40)}</font>"},
     ]
     return {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True, "update_multi": True},
+        "config": {"wide_screen_mode": False, "update_multi": True},
         "header": {"template": "blue", "title": {"tag": "plain_text", "content": f"🆕 新询盘 · {channel}"}},
         "body": {"direction": "vertical", "elements": elements},
     }
 
 
-def _post(card):
+def build_flat_card(*, mailbox, from_, email, subject, date, summary, original, translation, inquiry_id, channel="邮件"):
+    """Fallback without collapsible panels, for webhook schema quirks."""
+    elements = [
+        {"tag": "markdown", "content": f"**{_md(summary, 80) or '（无摘要）'}**"},
+        {"tag": "markdown", "content": _meta_lines(mailbox, from_, email, subject, date, channel)},
+        {"tag": "hr"},
+        {"tag": "markdown", "content": "**📄 原文**"},
+        {"tag": "div", "text": {"tag": "plain_text", "content": short_text(original)[:MAX_TEXT] or "（空）"}},
+    ]
+    if translation and translation.strip() != (original or "").strip():
+        elements += [
+            {"tag": "markdown", "content": "**🌐 译文**"},
+            {"tag": "div", "text": {"tag": "plain_text", "content": short_text(translation)[:MAX_TEXT]}},
+        ]
+    elements += [
+        {"tag": "hr"},
+        {"tag": "markdown", "content": f"<font color='grey'>{_md(inquiry_id, 40)}</font>"},
+    ]
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": False, "update_multi": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": f"🆕 新询盘 · {channel}"}},
+        "body": {"direction": "vertical", "elements": elements},
+    }
+
+
+def _post(card, fallback=None):
     payload = json.dumps({"msg_type": "interactive", "card": card}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         WEBHOOK_URL,
@@ -238,6 +277,9 @@ def _post(card):
         return False
     if data.get("code") not in (0, None):
         log("webhook rejected:", data.get("code"), data.get("msg"))
+        if fallback is not None:
+            log("retrying with the flat card layout")
+            return _post(fallback)
         return False
     return True
 
@@ -268,7 +310,7 @@ def notify_if_new_inquiry(*, mailbox, folder, from_, email, subject, body, date)
         return False
 
     inquiry_id = "INQ-" + datetime.now(BEIJING).strftime("%Y%m%d-%H%M%S")
-    card = build_card(
+    fields = dict(
         mailbox=mailbox,
         from_=from_,
         email=email,
@@ -279,7 +321,8 @@ def notify_if_new_inquiry(*, mailbox, folder, from_, email, subject, body, date)
         translation=result["translation"],
         inquiry_id=inquiry_id,
     )
-    if not _post(card):
+    card = build_card(**fields)
+    if not _post(card, build_flat_card(**fields)):
         return False
     log(f"new inquiry forwarded: {email} confidence={result['confidence']:.2f} id={inquiry_id}")
     return True
