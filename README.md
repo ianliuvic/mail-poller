@@ -29,6 +29,7 @@
 | `INQUIRY_STATE_FILE` | 首次接触记录，默认 `/data/inquiry_seen.json` |
 | `INQUIRY_MIN_CONFIDENCE` | 判定为真实询盘的最低置信度，默认 `0.65` |
 | `INQUIRY_MAX_TEXT_CHARS` | 卡片原文/译文的最大字符数，默认 `4000` |
+| `NOTIFY_LEDGER_PATH` | 通知去重账本（SQLite），默认 `/data/notify_ledger.db` |
 
 ## 说明
 

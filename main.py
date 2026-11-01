@@ -46,6 +46,7 @@ import tracking
 import followups
 import whatsapp
 import inquiry
+import notify_ledger
 
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
@@ -744,6 +745,13 @@ def poll_once():
                     "summary": r["summary"],
                 })
                 if not r["should"]:
+                    continue
+                # A deploy can overlap two pollers. Claim the message in the shared
+                # ledger so only one of them notifies Feishu for this UID.
+                notify_key = f"{name}::{item.get('folder', '')}::{item.get('uid', '')}"
+                if not notify_ledger.claim(notify_key):
+                    log(f"skip duplicate notification: {notify_key}")
+                    poll_progress(f"mail-complete:{name}:{item.get('uid', '')}")
                     continue
                 log(f"notify card: [{r['label']}] {from_} | {subject}")
                 key = f"{item.get('folder', '')}::{item.get('uid', '')}"
