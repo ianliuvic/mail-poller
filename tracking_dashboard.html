@@ -109,7 +109,8 @@
   <div id="emailView">
     <div class="chips" id="chips">
       <div class="chip on" data-f="all">全部</div>
-      <div class="chip" data-f="unopened">未打开</div>
+      <div class="chip" data-f="unopened" title="完全没有命中（含代理/自己打开都没有）">未打开</div>
+      <div class="chip" data-f="human-unread" title="客户还没看过（代理预取、自己查看不算）">真人未读</div>
       <div class="chip" data-f="opened">已打开</div>
       <div class="chip" data-f="human">真人已读</div>
     </div>
@@ -248,6 +249,7 @@ function matches(r){
     if(!hay.includes(QUERY)) return false;
   }
   if(FILTER==='unopened') return !r.first_open_at && !r.manual_read_at;
+  if(FILTER==='human-unread') return !r.first_human_open_at && !r.manual_read_at;
   if(FILTER==='opened') return !!(r.first_open_at || r.manual_read_at);
   if(FILTER==='human') return !!(r.first_human_open_at || r.manual_read_at);
   return true;
