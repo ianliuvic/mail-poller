@@ -45,6 +45,7 @@ import zoho_contacts
 import tracking
 import followups
 import whatsapp
+import inquiry
 
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
@@ -750,6 +751,25 @@ def poll_once():
                     cache_mail(key, from_, subject, item.get("date", ""), folder_label, item.get("body", ""), item.get("attachments", []))
                 except Exception as e:
                     log("mail cache write failed:", e)
+                # First email from a stranger: screen it strictly. Only a confident
+                # swimwear buyer inquiry goes to the dedicated group, and only there.
+                if r["label"] == "泳装相关":
+                    try:
+                        forwarded = inquiry.notify_if_new_inquiry(
+                            mailbox=mb.get("user") or name,
+                            folder=folder_label,
+                            from_=from_,
+                            email=email,
+                            subject=subject,
+                            body=item.get("body", ""),
+                            date=item.get("date", ""),
+                        )
+                    except Exception as e:
+                        log("inquiry forward failed:", e)
+                        forwarded = False
+                    if forwarded:
+                        poll_progress(f"mail-complete:{name}:{item.get('uid', '')}")
+                        continue
                 try:
                     if r["buttons"]:
                         # stranger inquiry: full button set + guidance form

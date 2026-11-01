@@ -25,6 +25,10 @@
 | `HONGXIU_RAG_TOKEN` | Hongxiu RAG MCP bearer token（必填） |
 | `HONGXIU_RAG_TOP_K` | 自动回复检索的来源数量，默认 8 |
 | `HONGXIU_RAG_TIMEOUT_SECONDS` | RAG 查询超时，默认 90 秒 |
+| `INQUIRY_WEBHOOK_URL` | 新询盘群的飞书自定义机器人 webhook；留空则不启用新询盘分流 |
+| `INQUIRY_STATE_FILE` | 首次接触记录，默认 `/data/inquiry_seen.json` |
+| `INQUIRY_MIN_CONFIDENCE` | 判定为真实询盘的最低置信度，默认 `0.65` |
+| `INQUIRY_MAX_TEXT_CHARS` | 卡片原文/译文的最大字符数，默认 `4000` |
 
 ## 说明
 
@@ -53,6 +57,14 @@
 2. 否则判断是否「回复我」：有 `In-Reply-To`/`References`/`Re:` 且（引用了我发出的 Message-ID，或发件人在我的发件收件人集合里）→ 放行（标签「回复」）。转发不算回复。
 3. 否则交给 LLM 判定：只有具有明确买方/客户意图的 `useful`（泳装相关）才放行；`neutral`（含义不明、没有具体诉求）和 `unrelated`（广告、陌生服务商或供应商开发信、通知、新闻、垃圾）均阻挡。
 4. 放行的邮件用 LLM 生成一句中文摘要，推送到飞书（卡片消息）。**所有卡片**带「📄 查看原文」按钮（从 `/data/mail_cache.json` 取正文发给飞书）；**只有「泳装相关」的陌生询盘**额外带「➕ 加入 CAM-03」按钮。
+
+## 新询盘群（卡片只读，群里可讨论）
+
+- 只处理**第一次**出现的陌生邮箱：同地址后续来信不再进群（记录在 `INQUIRY_STATE_FILE`）。
+- 在第一轮 `useful` 之后再做一次更严格的判定：必须同时有泳装产品、买方意图和具体诉求；钓鱼/转账/加 WhatsApp 私聊、供应商与货代推销、泛泛「想合作」一律不算。
+- 置信度低于 `INQUIRY_MIN_CONFIDENCE` 不发送。
+- 命中后卡片只发到 `INQUIRY_WEBHOOK_URL` 对应的群（飞书自定义机器人 webhook，外部群可用），不再重复发单聊；卡片无按钮，只有摘要、来源、时间、原文、译文。群成员可以像平常一样在群里引用卡片讨论、留言或安排跟进。
+- 未命中的「泳装相关」邮件仍按原逻辑发单聊，不会丢。
 
 ## 飞书事件回调
 
