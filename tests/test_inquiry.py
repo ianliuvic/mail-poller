@@ -26,6 +26,8 @@ class InquiryCardTests(unittest.TestCase):
         self.assertNotIn("button", json.dumps(card))
         panels = [e["header"]["title"]["content"] for e in elements if e["tag"] == "collapsible_panel"]
         self.assertEqual(panels, ["📄 原文", "🌐 译文"])
+        inner = [e["elements"][0]["tag"] for e in elements if e["tag"] == "collapsible_panel"]
+        self.assertEqual(inner, ["markdown", "markdown"])
 
     def test_markdown_injection_is_neutralised(self):
         card = inquiry.build_card(
