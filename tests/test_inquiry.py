@@ -118,6 +118,26 @@ class NewInquiryFlowTests(unittest.TestCase):
         post.assert_not_called()
         self.assertTrue(inquiry.already_screened("A@Example.com"))
 
+    def test_allowlisted_sender_is_not_deduped(self):
+        result = {
+            "is_inquiry": True, "confidence": 0.9, "reason": "form",
+            "summary": "摘要", "translation": "翻译",
+        }
+        with patch.object(inquiry, "is_configured", return_value=True), \
+                patch.object(inquiry, "judge", return_value=(result, None)), \
+                patch.object(inquiry, "_post", return_value=True) as post:
+            first = inquiry.notify_if_new_inquiry(
+                mailbox="zoho", folder="收件箱", from_="site", email="service@wearhongxiu.com",
+                subject="Wholesale inquiry", body="form", date="2026-11-02",
+            )
+            second = inquiry.notify_if_new_inquiry(
+                mailbox="zoho", folder="收件箱", from_="site", email="service@wearhongxiu.com",
+                subject="Wholesale inquiry", body="form", date="2026-11-02",
+            )
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertEqual(post.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

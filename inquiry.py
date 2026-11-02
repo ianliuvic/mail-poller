@@ -24,6 +24,16 @@ WEBHOOK_URL = os.environ.get("INQUIRY_WEBHOOK_URL", "").strip()
 STATE_FILE = os.environ.get("INQUIRY_STATE_FILE", "/data/inquiry_seen.json")
 MIN_CONFIDENCE = float(os.environ.get("INQUIRY_MIN_CONFIDENCE", "0.65"))
 MAX_TEXT = int(os.environ.get("INQUIRY_MAX_TEXT_CHARS", "4000"))
+# Website form notifications (and other self-sent mail) share one From address.
+# They still go through screening, but must not consume a single "first contact"
+# slot that would swallow every later form submission.
+REPEAT_SENDERS = {
+    item.strip().lower()
+    for item in os.environ.get(
+        "INQUIRY_REPEAT_SENDERS", "ian@wearhongxiu.com,service@wearhongxiu.com"
+    ).split(",")
+    if item.strip()
+}
 BEIJING = timezone(timedelta(hours=8))
 
 _lock = threading.Lock()
@@ -295,8 +305,10 @@ def notify_if_new_inquiry(*, mailbox, folder, from_, email, subject, body, date)
     if not is_configured() or not email:
         return False
     email = email.lower()
-    if already_screened(email):
+    if email not in REPEAT_SENDERS and already_screened(email):
         return False
+    if email in REPEAT_SENDERS:
+        log(f"repeat sender {email}: screening without first-contact dedupe")
 
     clean = mailai.strip_quotes(body or "")
     result, err = judge(from_, subject, clean)
