@@ -30,7 +30,8 @@ MAX_TEXT = int(os.environ.get("INQUIRY_MAX_TEXT_CHARS", "4000"))
 REPEAT_SENDERS = {
     item.strip().lower()
     for item in os.environ.get(
-        "INQUIRY_REPEAT_SENDERS", "ian@wearhongxiu.com,service@wearhongxiu.com"
+        "INQUIRY_REPEAT_SENDERS",
+        "ian@wearhongxiu.com,service@wearhongxiu.com,wordpress@wearhongxiu.com",
     ).split(",")
     if item.strip()
 }
