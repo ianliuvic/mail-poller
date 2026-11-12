@@ -108,6 +108,13 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS ix_events_token ON tracking_events(token, at);
             CREATE INDEX IF NOT EXISTS ix_events_at ON tracking_events(at);
+            CREATE TABLE IF NOT EXISTS email_templates (
+                id             TEXT PRIMARY KEY,
+                name           TEXT NOT NULL,
+                html           TEXT NOT NULL,
+                created_at     TEXT,
+                updated_at     TEXT
+            );
             """
         )
         # 兼容老库：新增列
@@ -596,6 +603,67 @@ def purge(target: str) -> int:
         return len(tokens)
 
 
+# ---------------------------------------------------------------- templates
+
+
+def list_templates() -> list:
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, name, html, created_at, updated_at FROM email_templates "
+            "ORDER BY COALESCE(updated_at, created_at) DESC, name"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_template(template_id: str, name: str, html: str) -> dict:
+    name = (name or "").strip()[:120]
+    html = str(html or "")
+    if not name or not html.strip():
+        return {"ok": False, "error": "name and html are required"}
+
+    now = _now()
+    template_id = (template_id or "").strip()[:80]
+    if not template_id:
+        template_id = "tpl_" + base64.urlsafe_b64encode(os.urandom(9)).decode().rstrip("=")
+
+    with _connect() as conn:
+        exists = conn.execute(
+            "SELECT id, created_at FROM email_templates WHERE id = ?", (template_id,)
+        ).fetchone()
+        if exists:
+            created_at = exists[1] or now
+            conn.execute(
+                "UPDATE email_templates SET name = ?, html = ?, updated_at = ? WHERE id = ?",
+                (name, html, now, template_id),
+            )
+        else:
+            created_at = now
+            conn.execute(
+                "INSERT INTO email_templates (id, name, html, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (template_id, name, html, created_at, now),
+            )
+    return {
+        "ok": True,
+        "template": {
+            "id": template_id,
+            "name": name,
+            "html": html,
+            "created_at": created_at,
+            "updated_at": now,
+        },
+    }
+
+
+def delete_template(template_id: str) -> bool:
+    if not (template_id or "").strip():
+        return False
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM email_templates WHERE id = ?", (template_id.strip(),))
+        return cur.rowcount > 0
+
+
 # ---------------------------------------------------------------- dashboard
 
 
@@ -648,6 +716,29 @@ def authorized(headers, query: dict) -> bool:
         return True
     supplied = (query.get("token") or [""])[0] if isinstance(query.get("token"), list) else query.get("token", "")
     return supplied == PAGE_TOKEN or _cookie_token(headers) == PAGE_TOKEN
+
+
+ZOHO_ORIGINS = ("https://mail.zoho.com.cn", "https://mail.zoho.com")
+
+
+def _cors_headers(headers):
+    origin = headers.get("origin", "")
+    if origin in ZOHO_ORIGINS or origin.startswith("chrome-extension://"):
+        return [
+            ("Access-Control-Allow-Origin", origin),
+            ("Access-Control-Allow-Headers", "content-type, x-tracking-key"),
+            ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+            ("Vary", "Origin"),
+        ]
+    return []
+
+
+def _tracking_key_ok(headers, query: dict) -> bool:
+    expected = os.environ.get("TRACKING_REGISTER_KEY", "") or PAGE_TOKEN
+    if not expected:
+        return False
+    supplied = headers.get("x-tracking-key", "") or (query.get("key") or [""])[0]
+    return supplied == expected
 
 
 def _send(handler, status: int, body: bytes, content_type: str, extra_headers=None):
@@ -840,6 +931,63 @@ def handle(handler, method: str) -> bool:
                 ensure_ascii=False,
             ).encode("utf-8"),
             "application/json; charset=utf-8",
+        )
+        return True
+
+    if path.rstrip("/").startswith("/api/templates"):
+        cors = _cors_headers(handler.headers)
+        if method == "OPTIONS":
+            _send(handler, 204, b"", "text/plain", cors)
+            return True
+        if not (authorized(handler.headers, query) or _tracking_key_ok(handler.headers, query)):
+            _send(handler, 401, b'{"error":"unauthorized"}', "application/json", cors)
+            return True
+
+        base = path.rstrip("/")
+
+        def _payload() -> dict:
+            try:
+                length = int(handler.headers.get("content-length", 0) or 0)
+                return json.loads(handler.rfile.read(length) or b"{}")
+            except Exception:
+                return {}
+
+        if base.endswith("/save"):
+            if method != "POST":
+                _send(handler, 405, b'{"error":"method not allowed"}', "application/json", cors)
+                return True
+            payload = _payload()
+            result = save_template(payload.get("id", ""), payload.get("name", ""), payload.get("html", ""))
+            _send(
+                handler,
+                200 if result.get("ok") else 400,
+                json.dumps(result, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+                cors,
+            )
+            return True
+
+        if base.endswith("/delete"):
+            if method != "POST":
+                _send(handler, 405, b'{"error":"method not allowed"}', "application/json", cors)
+                return True
+            payload = _payload()
+            ok = delete_template(payload.get("id", ""))
+            _send(
+                handler,
+                200 if ok else 404,
+                json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8"),
+                "application/json; charset=utf-8",
+                cors,
+            )
+            return True
+
+        _send(
+            handler,
+            200,
+            json.dumps({"templates": list_templates()}, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            cors,
         )
         return True
 

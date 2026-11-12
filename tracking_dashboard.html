@@ -83,6 +83,27 @@
              border:1px solid var(--line);border-radius:6px;white-space:nowrap}
   .actions a:hover{background:#f2f3f5}
   .empty{padding:28px;text-align:center;color:var(--muted)}
+  .hint{font-size:11.5px;color:var(--muted);line-height:1.5}
+  .tpl-preview{font-size:12px;color:#3c4043;max-height:58px;overflow:hidden;line-height:1.5}
+  #tplRows td:last-child{white-space:nowrap}
+  #tplRows .actions{flex-wrap:nowrap}
+  .modal{position:fixed;inset:0;background:rgba(15,18,22,.45);display:flex;align-items:center;
+         justify-content:center;z-index:50;padding:20px}
+  .modal-box{background:#fff;border-radius:12px;width:min(760px,100%);max-height:88vh;overflow:auto;
+             padding:20px 22px;box-shadow:0 18px 48px rgba(0,0,0,.28)}
+  .modal-box h2{font-size:16px;margin:0 0 10px}
+  .modal-box label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+  .modal-box input,.modal-box textarea{width:100%;padding:8px 10px;border:1px solid var(--line);
+             border-radius:8px;font:inherit;background:#fff;outline:none}
+  .modal-box input:focus,.modal-box textarea:focus{border-color:#c7cbd1}
+  .modal-box textarea{min-height:260px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+             font-size:12.5px;line-height:1.55;resize:vertical}
+  .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+  #tplSave{background:#1f2328;color:#fff;border-color:#1f2328}
+  #tplSave:hover{background:#33383e}
+  .modal .msg{font-size:12px;margin-top:10px;min-height:16px}
+  .modal .msg.err{color:var(--red)}
+  .modal .msg.ok{color:var(--green)}
   @media(max-width:820px){.cards{grid-template-columns:repeat(2,1fr)}
     .ev{grid-template-columns:1fr 1fr}}
 </style>
@@ -104,6 +125,7 @@
     <div class="tab" data-view="contact">按客户</div>
     <div class="tab" data-view="followup">待跟进</div>
     <div class="tab" data-view="wa">WhatsApp</div>
+    <div class="tab" data-view="template">模板</div>
   </div>
 
   <div id="emailView">
@@ -204,6 +226,46 @@
     </table>
   </div>
 
+  <div id="templateView" style="display:none">
+    <div class="toolbar">
+      <input type="search" id="qt" placeholder="搜索模板名称…">
+      <button id="tplNew">＋ 新建模板</button>
+      <button id="tplRefresh">刷新</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:22%">模板名称</th>
+          <th>内容预览</th>
+          <th style="width:15%">更新时间</th>
+          <th style="width:20%">操作</th>
+        </tr>
+      </thead>
+      <tbody id="tplRows"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+    </table>
+    <div class="hint" style="margin-top:10px">
+      这里和 Chrome 插件共用同一份模板：看板增删改后，插件刷新会自动拉到最新。
+    </div>
+  </div>
+
+</div>
+
+<div class="modal" id="tplModal" style="display:none" role="dialog" aria-modal="true">
+  <div class="modal-box">
+    <h2 id="tplModalTitle">新建模板</h2>
+    <label for="tplNameInput">模板名称</label>
+    <input id="tplNameInput" type="text" placeholder="例如：首次询盘回复" autocomplete="off">
+    <label for="tplHtmlInput">HTML 内容</label>
+    <textarea id="tplHtmlInput" spellcheck="false" placeholder="&lt;p&gt;Hi {{email}},&lt;/p&gt;&#10;&lt;p&gt;Thanks for your inquiry.&lt;/p&gt;"></textarea>
+    <div class="hint">
+      使用内联样式；&lt;script&gt;、&lt;style&gt; 会被插件过滤。支持 {{email}}（第一个收件人）和 {{recipients}}（全部收件人）。
+    </div>
+    <div class="modal-actions">
+      <button id="tplCancel">取消</button>
+      <button id="tplSave">保存模板</button>
+    </div>
+    <div id="tplMsg" class="msg"></div>
+  </div>
 </div>
 
 <script>
@@ -740,6 +802,108 @@ async function loadWa(){
     $('rows4').innerHTML = '<tr><td colspan="7" class="empty">加载失败：' + esc(err.message) + '</td></tr>';
   }
 }
+let TPL = [];
+let TPL_Q = '';
+let TPL_EDIT_ID = null;
+
+function tplPreview(html){
+  try{
+    const spaced = String(html||'')
+      .replace(/<\/(p|div|li|tr|h[1-6]|blockquote)>/gi, '$& ')
+      .replace(/<br\s*\/?>/gi, ' ');
+    const doc = new DOMParser().parseFromString(spaced, 'text/html');
+    const text = (doc.body.textContent || '').replace(/\s+/g,' ').trim();
+    return text.slice(0, 180) || '（无文字内容）';
+  }catch(e){ return ''; }
+}
+function renderTemplates(){
+  const q = TPL_Q;
+  const list = TPL.filter(t =>
+    !q || (t.name||'').toLowerCase().includes(q) || (t.html||'').toLowerCase().includes(q));
+  if(!list.length){
+    $('tplRows').innerHTML = `<tr><td colspan="4" class="empty">${
+      TPL.length ? '没有匹配的模板' : '还没有模板，点右上角「新建模板」'
+    }</td></tr>`;
+    return;
+  }
+  $('tplRows').innerHTML = list.map(t=>`
+    <tr>
+      <td class="tpl-name">${esc(t.name)}</td>
+      <td><div class="tpl-preview">${esc(tplPreview(t.html))}</div></td>
+      <td>${fmt(t.updated_at || t.created_at)}</td>
+      <td>
+        <div class="actions">
+          <button data-tpl="edit" data-id="${esc(t.id)}">编辑</button>
+          <button data-tpl="copy" data-id="${esc(t.id)}">复制 HTML</button>
+          <button data-tpl="del" data-id="${esc(t.id)}">删除</button>
+        </div>
+      </td>
+    </tr>`).join('');
+
+  document.querySelectorAll('#tplRows button[data-tpl]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const tpl = TPL.find(t=>t.id === btn.dataset.id);
+      if(!tpl) return;
+      if(btn.dataset.tpl === 'edit') openTemplateModal(tpl);
+      else if(btn.dataset.tpl === 'del') await deleteTemplate(tpl);
+      else if(btn.dataset.tpl === 'copy') await copyTemplate(tpl, btn);
+    });
+  });
+}
+function setTplMsg(text, kind){
+  const el = $('tplMsg');
+  el.textContent = text || '';
+  el.className = 'msg' + (kind ? ' ' + kind : '');
+}
+function openTemplateModal(tpl){
+  TPL_EDIT_ID = tpl ? tpl.id : null;
+  $('tplModalTitle').textContent = tpl ? '编辑模板' : '新建模板';
+  $('tplNameInput').value = tpl ? (tpl.name || '') : '';
+  $('tplHtmlInput').value = tpl ? (tpl.html || '') : '';
+  setTplMsg('');
+  $('tplModal').style.display = 'flex';
+  setTimeout(()=>$('tplNameInput').focus(), 30);
+}
+function closeTemplateModal(){
+  $('tplModal').style.display = 'none';
+  TPL_EDIT_ID = null;
+}
+async function loadTemplates(){
+  $('tplRows').innerHTML = '<tr><td colspan="4" class="empty">加载中…</td></tr>';
+  try{
+    const res = await fetch('/api/templates', {credentials:'same-origin'});
+    if(res.status === 401){ location.href = '/tracking'; return; }
+    const j = await res.json();
+    TPL = Array.isArray(j.templates) ? j.templates : [];
+    renderTemplates();
+  }catch(err){
+    $('tplRows').innerHTML = '<tr><td colspan="4" class="empty">加载失败：' + esc(err.message) + '</td></tr>';
+  }
+}
+async function deleteTemplate(tpl){
+  if(!confirm(`删除模板「${tpl.name}」？`)) return;
+  try{
+    const res = await fetch('/api/templates/delete', {
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id: tpl.id})
+    });
+    if(!res.ok) throw new Error('删除失败');
+    TPL = TPL.filter(t=>t.id !== tpl.id);
+    renderTemplates();
+  }catch(err){ alert(err.message); }
+}
+async function copyTemplate(tpl, btn){
+  try{
+    await navigator.clipboard.writeText(tpl.html || '');
+    const old = btn.textContent;
+    btn.textContent = '已复制';
+    setTimeout(()=>{ btn.textContent = old; }, 1200);
+  }catch(err){
+    window.prompt('复制下面的 HTML：', tpl.html || '');
+  }
+}
+
 function switchView(v){
   VIEW = v;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on', t.dataset.view===v));
@@ -747,9 +911,11 @@ function switchView(v){
   $('contactView').style.display = v==='contact' ? '' : 'none';
   $('followupView').style.display = v==='followup' ? '' : 'none';
   $('waView').style.display = v==='wa' ? '' : 'none';
+  $('templateView').style.display = v==='template' ? '' : 'none';
   if(v==='email') renderEmails();
   else if(v==='contact') renderContacts();
   else if(v==='followup') loadFollowups();
+  else if(v==='template') loadTemplates();
   else loadWa();
 }
 async function load(){
@@ -834,6 +1000,46 @@ if(waSyncBtn){
 bindSort('emailTable', 'email', renderEmails);
 bindSort('fuTable', 'followup', renderFollowups);
 bindSort('waTable', 'wa', renderWa);
+
+/* ---------------- 模板 ---------------- */
+$('tplNew').addEventListener('click', ()=>openTemplateModal(null));
+$('tplRefresh').addEventListener('click', loadTemplates);
+$('qt').addEventListener('input', (e)=>{
+  TPL_Q = e.target.value.trim().toLowerCase();
+  renderTemplates();
+});
+$('tplCancel').addEventListener('click', closeTemplateModal);
+$('tplModal').addEventListener('click', (e)=>{
+  if(e.target === $('tplModal')) closeTemplateModal();
+});
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'Escape' && $('tplModal').style.display === 'flex') closeTemplateModal();
+});
+$('tplSave').addEventListener('click', async ()=>{
+  const name = $('tplNameInput').value.trim();
+  const html = $('tplHtmlInput').value.trim();
+  if(!name){ setTplMsg('请填写模板名称', 'err'); return; }
+  if(!html){ setTplMsg('模板 HTML 不能为空', 'err'); return; }
+
+  const btn = $('tplSave');
+  btn.disabled = true;
+  setTplMsg('保存中…', '');
+  try{
+    const res = await fetch('/api/templates/save', {
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id: TPL_EDIT_ID || '', name, html})
+    });
+    const j = await res.json().catch(()=>({}));
+    if(!res.ok || j.ok === false) throw new Error(j.error || '保存失败');
+    closeTemplateModal();
+    await loadTemplates();
+  }catch(err){
+    setTplMsg(err.message, 'err');
+  }
+  btn.disabled = false;
+});
+
 load();
 </script>
 </body>

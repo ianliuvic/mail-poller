@@ -92,6 +92,8 @@
   浏览器插件在插入像素时调用，让**还没被打开**的邮件也能出现在面板里；不登记的话只有被打开后才出现。
 - 数据：`GET /api/tracking?token=...`，返回汇总 + 每个收件人的首开/最近/次数/客户端 + 事件明细。
 - 清理：`GET /api/tracking/purge?token=...&target=<邮箱或token>`，删除测试记录。
+- 模板：`GET /api/templates`、`POST /api/templates/save`、`POST /api/templates/delete`。
+  看板「模板」Tab 和 Chrome 插件共用；支持看板 Cookie，或 `X-Tracking-Key`（默认等于 `TRACKING_PAGE_TOKEN`）。
 
 环境变量：
 
