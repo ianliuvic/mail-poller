@@ -23,6 +23,7 @@ import mailai
 WEBHOOK_URL = os.environ.get("INQUIRY_WEBHOOK_URL", "").strip()
 STATE_FILE = os.environ.get("INQUIRY_STATE_FILE", "/data/inquiry_seen.json")
 MIN_CONFIDENCE = float(os.environ.get("INQUIRY_MIN_CONFIDENCE", "0.65"))
+FORM_MIN_CONFIDENCE = float(os.environ.get("INQUIRY_FORM_MIN_CONFIDENCE", "0.5"))
 MAX_TEXT = int(os.environ.get("INQUIRY_MAX_TEXT_CHARS", "4000"))
 # Website form notifications (and other self-sent mail) share one From address.
 # They still go through screening, but must not consume a single "first contact"
@@ -121,6 +122,8 @@ _SYSTEM = """你是红绣泳装（中国泳装/瑜伽服工厂）的询盘审核
 - 使用 Gmail 等通用邮箱；
 - 索要目录、阿里/中国制造网店铺链接、首单交期和付款条件；
 - 先试单、再按供应商表现放量。
+
+本站网站表单的例外：如果发件人是 service@ / wordpress@ / ian@wearhongxiu.com，正文含 Name、Email、Looking for、Submitted from 等表单字段，且 Looking for 或 Message 表达了批发、现货、目录、报价、定制等采购需求，即使没有数量、款式、MOQ，也判 true。门户注册、门户访问申请、付款通知、POD 设计完成等系统通知仍判 false。
 
 判断依据只看邮件本身，不要因为出现 Re:、urgent、big order、partnership 等词就放行。
 不确定时一律判 false（宁缺勿滥）。
@@ -325,7 +328,8 @@ def notify_if_new_inquiry(*, mailbox, folder, from_, email, subject, body, date)
         return False
 
     _remember(email, result["is_inquiry"], result["confidence"], result["reason"], subject)
-    if not result["is_inquiry"] or result["confidence"] < MIN_CONFIDENCE:
+    threshold = FORM_MIN_CONFIDENCE if email in REPEAT_SENDERS else MIN_CONFIDENCE
+    if not result["is_inquiry"] or result["confidence"] < threshold:
         log(f"not an inquiry: {email} confidence={result['confidence']:.2f} reason={result['reason']}")
         return False
 

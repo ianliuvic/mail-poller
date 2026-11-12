@@ -28,6 +28,7 @@
 | `INQUIRY_WEBHOOK_URL` | 新询盘群的飞书自定义机器人 webhook；留空则不启用新询盘分流 |
 | `INQUIRY_STATE_FILE` | 首次接触记录，默认 `/data/inquiry_seen.json` |
 | `INQUIRY_MIN_CONFIDENCE` | 判定为真实询盘的最低置信度，默认 `0.65` |
+| `INQUIRY_FORM_MIN_CONFIDENCE` | 本站表单发件人的最低置信度，默认 `0.5` |
 | `INQUIRY_MAX_TEXT_CHARS` | 卡片原文/译文的最大字符数，默认 `4000` |
 | `NOTIFY_LEDGER_PATH` | 通知去重账本（SQLite），默认 `/data/notify_ledger.db` |
 | `INQUIRY_REPEAT_SENDERS` | 不做首次去重的发件人（逗号分隔），默认 `ian@`、`service@`、`wordpress@` |
