@@ -31,7 +31,7 @@
 | `INQUIRY_FORM_MIN_CONFIDENCE` | 本站表单发件人的最低置信度，默认 `0.5` |
 | `INQUIRY_MAX_TEXT_CHARS` | 卡片原文/译文的最大字符数，默认 `4000` |
 | `NOTIFY_LEDGER_PATH` | 通知去重账本（SQLite），默认 `/data/notify_ledger.db` |
-| `INQUIRY_REPEAT_SENDERS` | 不做首次去重的发件人（逗号分隔），默认 `ian@`、`service@`、`wordpress@` |
+| `INQUIRY_REPEAT_SENDERS` | 网站表单发件人（逗号分隔），按正文 `Email:` 去重，默认 `ian@`、`service@`、`wordpress@` |
 
 ## 说明
 
@@ -64,7 +64,7 @@
 ## 新询盘群（卡片只读，群里可讨论）
 
 - 只处理**第一次**出现的陌生邮箱：同地址后续来信不再进群（记录在 `INQUIRY_STATE_FILE`）。
-- 例外：`INQUIRY_REPEAT_SENDERS`（默认 `ian@`、`service@`）跳过首次去重，每封都单独判定——网站表单通知都从同一个站内地址发出，不能互相吃掉。
+- 网站表单发件人（`ian@`、`service@`、`wordpress@`）不按发件人去重，而是提取正文里的 `Email:` 字段作为真正的客户键：同一客户只进群一次，不同客户互不影响；正文没有客户邮箱时退回按发件人去重。
 - 在第一轮 `useful` 之后再做一次更严格的判定：必须同时有泳装产品、买方意图和具体诉求；钓鱼/转账/加 WhatsApp 私聊、供应商与货代推销、泛泛「想合作」一律不算。
 - 置信度低于 `INQUIRY_MIN_CONFIDENCE` 不发送。
 - 命中后卡片只发到 `INQUIRY_WEBHOOK_URL` 对应的群（飞书自定义机器人 webhook，外部群可用），不再重复发单聊；卡片无按钮，只有摘要、来源、时间、原文、译文。群成员可以像平常一样在群里引用卡片讨论、留言或安排跟进。

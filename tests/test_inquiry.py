@@ -118,7 +118,7 @@ class NewInquiryFlowTests(unittest.TestCase):
         post.assert_not_called()
         self.assertTrue(inquiry.already_screened("A@Example.com"))
 
-    def test_allowlisted_sender_is_not_deduped(self):
+    def test_form_sender_dedupes_by_the_customer_email(self):
         result = {
             "is_inquiry": True, "confidence": 0.9, "reason": "form",
             "summary": "摘要", "translation": "翻译",
@@ -128,14 +128,22 @@ class NewInquiryFlowTests(unittest.TestCase):
                 patch.object(inquiry, "_post", return_value=True) as post:
             first = inquiry.notify_if_new_inquiry(
                 mailbox="zoho", folder="收件箱", from_="site", email="service@wearhongxiu.com",
-                subject="Wholesale inquiry", body="form", date="2026-11-02",
+                subject="POD inquiry", body="Name: A\nEmail: a@example.com\nLooking for: stock",
+                date="2026-11-02",
             )
-            second = inquiry.notify_if_new_inquiry(
+            same_customer = inquiry.notify_if_new_inquiry(
                 mailbox="zoho", folder="收件箱", from_="site", email="service@wearhongxiu.com",
-                subject="Wholesale inquiry", body="form", date="2026-11-02",
+                subject="POD inquiry", body="Name: A\nEmail: a@example.com\nLooking for: stock",
+                date="2026-11-02",
+            )
+            other_customer = inquiry.notify_if_new_inquiry(
+                mailbox="zoho", folder="收件箱", from_="site", email="service@wearhongxiu.com",
+                subject="POD inquiry", body="Name: B\nEmail: b@example.com\nLooking for: stock",
+                date="2026-11-02",
             )
         self.assertTrue(first)
-        self.assertTrue(second)
+        self.assertFalse(same_customer)
+        self.assertTrue(other_customer)
         self.assertEqual(post.call_count, 2)
 
 

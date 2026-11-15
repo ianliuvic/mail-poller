@@ -40,6 +40,16 @@ BEIJING = timezone(timedelta(hours=8))
 
 _lock = threading.Lock()
 
+_FORM_EMAIL_RE = re.compile(r"(?im)^\s*e-?mail\s*:\s*([^\s<>]+@[^\s<>]+)")
+
+
+def form_customer_email(body):
+    """Pull the real customer address out of a website form body."""
+    match = _FORM_EMAIL_RE.search(body or "")
+    if not match:
+        return ""
+    return match.group(1).strip().strip(".,;").lower()
+
 
 def log(*a):
     print(time.strftime("%Y-%m-%d %H:%M:%S"), "[inquiry]", *a, flush=True)
@@ -316,21 +326,28 @@ def notify_if_new_inquiry(*, mailbox, folder, from_, email, subject, body, date)
     if not is_configured() or not email:
         return False
     email = email.lower()
-    if email not in REPEAT_SENDERS and already_screened(email):
-        return False
-    if email in REPEAT_SENDERS:
-        log(f"repeat sender {email}: screening without first-contact dedupe")
-
+    is_form = email in REPEAT_SENDERS
     clean = mailai.strip_quotes(body or "")
+    dedupe_key = email
+    if is_form:
+        embedded = form_customer_email(clean)
+        if embedded:
+            dedupe_key = embedded
+            log(f"form sender {email}: dedupe by customer {embedded}")
+        else:
+            log(f"form sender {email}: no customer email in body, dedupe by sender")
+    if already_screened(dedupe_key):
+        return False
+
     result, err = judge(from_, subject, clean)
     if err or result is None:
-        log(f"screening failed for {email}: {err}")
+        log(f"screening failed for {dedupe_key}: {err}")
         return False
 
-    _remember(email, result["is_inquiry"], result["confidence"], result["reason"], subject)
-    threshold = FORM_MIN_CONFIDENCE if email in REPEAT_SENDERS else MIN_CONFIDENCE
+    _remember(dedupe_key, result["is_inquiry"], result["confidence"], result["reason"], subject)
+    threshold = FORM_MIN_CONFIDENCE if is_form else MIN_CONFIDENCE
     if not result["is_inquiry"] or result["confidence"] < threshold:
-        log(f"not an inquiry: {email} confidence={result['confidence']:.2f} reason={result['reason']}")
+        log(f"not an inquiry: {dedupe_key} confidence={result['confidence']:.2f} reason={result['reason']}")
         return False
 
     inquiry_id = "INQ-" + datetime.now(BEIJING).strftime("%Y%m%d-%H%M%S")
